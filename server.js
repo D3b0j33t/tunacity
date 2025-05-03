@@ -57,7 +57,14 @@ const upload = multer({
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static('frontend/build'));
+
+// Update static file serving - place this before routes
+app.use(express.static(path.join(__dirname, 'frontend/build')));
+
+// Add root route handler
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'frontend/build', 'index.html'));
+});
 
 // Add sanitizeFilename function
 function sanitizeFilename(filename) {
@@ -287,6 +294,11 @@ app.get('/api/download/:sessionId/progress', (req, res) => {
 
 // Serve downloaded files
 app.use('/downloads', express.static(DOWNLOAD_DIR));
+
+// Add catch-all route for client-side routing
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'frontend/build', 'index.html'));
+});
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
