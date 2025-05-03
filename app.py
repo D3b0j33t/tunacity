@@ -537,10 +537,13 @@ async def recognize_song(file_path):
     """Use ShazamIO to recognize a song from an audio file"""
     try:
         shazam = Shazam()
-        # Update to use the new recognize method instead of recognize_song
-        out = await shazam.recognize(file_path)
+        # Use recognize_song instead of recognize
+        out = await shazam.recognize_song(file_path)
         if out and out.get('track'):
             return out
+        return None
+    except AttributeError as e:
+        logger.error(f"ShazamIO API error: {str(e)}. Please update shazamio package.")
         return None
     except Exception as e:
         logger.error(f"Error recognizing song: {str(e)}")
