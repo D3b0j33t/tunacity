@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_file, Response, after_this_request
+from flask_talisman import Talisman  # Add this import at the top
 import os
 import asyncio
 from shazamio import Shazam
@@ -27,6 +28,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
+
+# Security headers configuration
+Talisman(app,
+    content_security_policy={
+        'default-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'", 
+                       "https://cdnjs.cloudflare.com", 
+                       "https://fonts.googleapis.com", 
+                       "https://fonts.gstatic.com"],
+        'media-src': ["'self'", "blob:"],
+        'connect-src': ["'self'"],
+        'img-src': ["'self'", "data:", "https:"],
+        'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        'style-src': ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", 
+                     "https://cdnjs.cloudflare.com"],
+        'font-src': ["'self'", "https://fonts.gstatic.com", 
+                    "https://cdnjs.cloudflare.com"]
+    },
+    feature_policy={
+        'microphone': "'self'",
+        'autoplay': "'self'"
+    }
+)
 
 # Configuration
 UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
@@ -404,11 +427,11 @@ def cleanup_old_downloads():
         logger.error(f"Error during cleanup: {str(e)}")
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 8080))  # Change default port to 8080
     if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-        # Use production server
+        # Use production server with SSL context
         from waitress import serve
-        serve(app, host='0.0.0.0', port=port)
+        serve(app, host='0.0.0.0', port=port, url_scheme='https')
     else:
         # Use development server
         app.run(host='0.0.0.0', port=port, debug=False)
