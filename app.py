@@ -23,7 +23,7 @@ import tempfile
 import psutil
 import hashlib
 from functools import wraps
-import traceback
+from werkzeug.security import safe_join
 
 # Configure logging first before any other initialization
 logging.basicConfig(
@@ -43,8 +43,8 @@ app = Flask(__name__, template_folder='templates', static_folder='static')
 
 # Railway-specific configuration
 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-    UPLOAD_FOLDER = '/tmp/beatsnatch_uploads'  # Use subdirectory in Railway's temporary directory
-    DOWNLOAD_FOLDER = '/tmp/beatsnatch_downloads'
+    UPLOAD_FOLDER = '/tmp/uploads'  # Specific subdirectory for uploads
+    DOWNLOAD_FOLDER = '/tmp/downloads'  # Specific subdirectory for downloads
     ffmpeg_path = "/root/.nix-profile/bin/ffmpeg"  # Updated path from logs
     ffprobe_path = "/root/.nix-profile/bin/ffprobe"  # Updated path from logs
     
@@ -94,7 +94,6 @@ app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'webm'}
 download_progress = {}
 progress_lock = Lock()
-CLEANUP_TIMEOUT = 1800  # 30 minutes (increased from 5 minutes)
 
 def check_ffmpeg():
     """Verify FFmpeg and FFprobe are available and working"""
@@ -175,15 +174,10 @@ def allowed_file(filename):
 
 def sanitize_filename(filename):
     """Remove potentially dangerous characters from filenames"""
-    # First replace spaces with underscores
+    # First, replace spaces with underscores
     filename = re.sub(r'\s+', '_', filename)
-    # Then remove any remaining special characters
-    filename = re.sub(r'[\\/*?:"<>|]', "", filename)
-    # Limit length to avoid path issues
-    if len(filename) > 100:
-        name, ext = os.path.splitext(filename)
-        filename = name[:95] + ext
-    return filename
+    # Then remove other problematic characters
+    return re.sub(r'[\\/*?:"<>|]', "", filename)
 
 # Check for FFmpeg availability early
 ffmpeg_available = check_ffmpeg()
@@ -255,12 +249,10 @@ def recognize():
     try:
         filename = secure_filename(audio_file.filename)
         unique_filename = f"{uuid.uuid4()}_{filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
         
         # Ensure upload directory exists
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-        
-        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
-        logger.info(f"Saving uploaded file to {file_path}")
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
         audio_file.save(file_path)
         logger.info(f"Audio saved to {file_path}")
@@ -384,11 +376,9 @@ def download():
         
         # Generate a session ID for this download
         session_id = str(uuid.uuid4())
-        
-        # Create download directory, ensuring it exists
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        # Ensure directory exists with proper permissions
         os.makedirs(download_dir, exist_ok=True)
-        logger.info(f"Created download directory at {download_dir}")
         
         # Get video ID from YouTube search
         result = search_youtube(song_title, artist)
@@ -403,13 +393,27 @@ def download():
         
         # Create a safe filename for the output
         safe_filename = sanitize_filename(f"{song_title} - {artist}")
-        logger.info(f"Using sanitized filename: {safe_filename}")
         
         # Start download in background
-        threading.Thread(
+        t = threading.Thread(
             target=background_download,
             args=(song_title, artist, session_id, video_id, download_dir, safe_filename)
-        ).start()
+        )
+        t.daemon = True
+        t.start()
+        
+        # Track this download in progress
+        with progress_lock:
+            download_progress[session_id] = {
+                "progress": 0,
+                "status": "started",
+                "title": song_title,
+                "artist": artist,
+                "filename": f"{safe_filename}.mp3",
+                "start_time": time.time()
+            }
+        
+        logger.info(f"Download started for session {session_id}, filename: {safe_filename}")
         
         return jsonify({
             "success": True,
@@ -431,71 +435,120 @@ def download():
 def get_download(session_id, filename):
     """Serve a downloaded file and clean up after download"""
     try:
-        # Make sure download directory exists
+        # Log all incoming download requests for debugging
+        logger.info(f"Download request received: session_id={session_id}, filename={filename}")
+        
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        
+        # Check if directory exists first
         if not os.path.exists(download_dir):
-            logger.warning(f"Download directory not found: {download_dir}")
+            logger.warning(f"Download directory does not exist: {download_dir}")
             return jsonify({
                 "success": False,
-                "message": "Download directory not found. It may have been cleaned up or never created."
+                "message": "Download directory not found",
+                "directory_checked": download_dir
             }), 404
-        
+            
         # If no filename provided, look for any MP3 file in the directory
         if not filename:
-            logger.info(f"No filename provided, searching for MP3 files in {download_dir}")
-            mp3_files = [f for f in os.listdir(download_dir) if f.endswith('.mp3')]
-            if mp3_files:
-                filename = mp3_files[0]
-                logger.info(f"Found MP3 file: {filename}")
-            else:
-                # Check if download is in progress
-                with progress_lock:
-                    if session_id in download_progress:
-                        progress = download_progress.get(session_id, {}).get('progress', 0)
-                        return jsonify({
-                            "success": False,
-                            "message": f"Download in progress: {progress:.1f}% complete"
-                        }), 202
-                logger.warning(f"No MP3 files found in {download_dir}")
+            try:
+                # List all files in the directory
+                files_in_dir = os.listdir(download_dir)
+                logger.info(f"Files in download directory: {files_in_dir}")
+                
+                mp3_files = [f for f in files_in_dir if f.endswith('.mp3')]
+                if mp3_files:
+                    filename = mp3_files[0]
+                    logger.info(f"Found MP3 file: {filename}")
+                else:
+                    # Check if download is in progress
+                    with progress_lock:
+                        if session_id in download_progress:
+                            progress = download_progress.get(session_id, {}).get('progress', 0)
+                            return jsonify({
+                                "success": False,
+                                "message": f"Download in progress: {progress:.1f}% complete"
+                            }), 202
+                    logger.warning(f"No MP3 files found in directory: {download_dir}")
+                    return jsonify({
+                        "success": False,
+                        "message": "No MP3 files found in download directory",
+                        "files_found": files_in_dir
+                    }), 404
+            except Exception as e:
+                logger.error(f"Error listing directory {download_dir}: {str(e)}")
                 return jsonify({
                     "success": False,
-                    "message": "No download found"
-                }), 404
+                    "message": f"Error accessing download directory: {str(e)}"
+                }), 500
         
-        # Construct the file path correctly
+        # Construct the full file path - IMPORTANT: No safe_join here to avoid path issues
         file_path = os.path.join(download_dir, filename)
-        logger.info(f"Looking for file at: {file_path}")
         
         # Check if file exists
         if not os.path.exists(file_path):
             logger.warning(f"File not found: {file_path}")
-            
-            # Debug: list directory contents
+            # List directory contents for debugging
             try:
-                dir_contents = os.listdir(download_dir)
-                logger.info(f"Directory contents of {download_dir}: {dir_contents}")
+                files_in_dir = os.listdir(download_dir)
+                logger.info(f"Files in directory: {files_in_dir}")
             except Exception as e:
-                logger.error(f"Error listing directory: {str(e)}")
-            
+                logger.error(f"Error listing directory contents: {str(e)}")
+                
             return jsonify({
                 "success": False,
-                "message": "File not found"
+                "message": "File not found",
+                "path_checked": file_path
             }), 404
-        
-        logger.info(f"File found, serving: {file_path}")
-        
-        # Schedule cleanup after successful download (but with longer timeout)
+            
+        logger.info(f"File found, preparing to serve: {file_path}")
+            
+        # Delayed cleanup - now we only schedule cleanup for 15 minutes later
+        # to ensure the file remains available for download
         @after_this_request
-        def cleanup(response):
+        def schedule_cleanup(response):
             try:
-                # Use a longer timeout for cleanup
-                threading.Thread(target=lambda: cleanup_download(file_path, download_dir, CLEANUP_TIMEOUT)).start()
+                def delayed_cleanup():
+                    # Wait 15 minutes before cleaning up
+                    time.sleep(15 * 60)
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            logger.info(f"Delayed cleanup: removed {file_path}")
+                        if os.path.exists(download_dir) and not os.listdir(download_dir):
+                            os.rmdir(download_dir)
+                            logger.info(f"Delayed cleanup: removed directory {download_dir}")
+                    except Exception as e:
+                        logger.error(f"Error in delayed cleanup: {str(e)}")
+                
+                # Start the delayed cleanup in a daemon thread
+                t = threading.Thread(target=delayed_cleanup)
+                t.daemon = True
+                t.start()
+                logger.info(f"Scheduled delayed cleanup for {file_path}")
             except Exception as e:
                 logger.error(f"Error scheduling cleanup: {str(e)}")
             return response
         
+        # Log the access before sending
+        logger.info(f"Serving file: {file_path}")
+        
+        # Attempt to open the file to verify it's readable
+        try:
+            with open(file_path, 'rb') as f:
+                # Read just a bit to verify the file is accessible
+                f.read(1024)
+        except Exception as e:
+            logger.error(f"Error accessing file for download: {str(e)}")
+            return jsonify({
+                "success": False,
+                "message": f"Error accessing file: {str(e)}"
+            }), 500
+            
+        # Send the file with explicit mimetype
         return send_file(
             file_path,
+            mimetype='audio/mpeg',
             as_attachment=True,
             download_name=os.path.basename(file_path)
         )
@@ -504,48 +557,42 @@ def get_download(session_id, filename):
         logger.error(f"Error serving download: {str(e)}", exc_info=True)
         return jsonify({
             "success": False,
-            "message": "Error serving download"
+            "message": f"Error serving download: {str(e)}"
         }), 500
 
 def background_download(song_title, artist, session_id, video_id, download_dir, safe_filename):
     """Background download function"""
     try:
-        # Log the parameters for debugging
-        logger.info(f"Starting background download: song_title={song_title}, artist={artist}, session_id={session_id}")
-        logger.info(f"Download directory: {download_dir}")
-        logger.info(f"Sanitized filename: {safe_filename}")
-        
-        # Make sure the download directory exists
-        os.makedirs(download_dir, exist_ok=True)
-        
-        # Download the song
+        logger.info(f"Starting background download for {safe_filename}")
         download_path = download_song(song_title, artist, session_id, video_id)
         
-        # Check if download was successful
         if download_path and os.path.exists(download_path):
-            logger.info(f"Download successful: {download_path}")
+            # Ensure the download directory exists
+            os.makedirs(download_dir, exist_ok=True)
             
-            # Create final path with sanitized filename
+            # Create the final path
             final_path = os.path.join(download_dir, f"{safe_filename}.mp3")
-            logger.info(f"Moving file to final path: {final_path}")
+            logger.info(f"Moving downloaded file from {download_path} to {final_path}")
             
-            # Copy the file instead of moving to avoid cross-device link errors
+            # Copy the file instead of moving it (more reliable)
+            shutil.copy2(download_path, final_path)
+            logger.info(f"File copied to {final_path}")
+            
+            # Delete the original file after copying
             try:
-                shutil.copy2(download_path, final_path)
-                logger.info(f"File copied to {final_path}")
-                
-                # Remove the original file after successful copy
                 os.remove(download_path)
-                logger.info(f"Original file removed: {download_path}")
-            except Exception as copy_err:
-                logger.error(f"Error copying file: {str(copy_err)}")
-                # If copy fails, try direct move as fallback
-                try:
-                    shutil.move(download_path, final_path)
-                    logger.info(f"File moved to {final_path} (fallback method)")
-                except Exception as move_err:
-                    logger.error(f"Error moving file: {str(move_err)}")
-                    return
+                logger.info(f"Original file {download_path} removed after copying")
+            except Exception as e:
+                logger.warning(f"Could not remove original file {download_path}: {str(e)}")
+            
+            # Update the download progress
+            with progress_lock:
+                if session_id in download_progress:
+                    download_progress[session_id].update({
+                        'progress': 100,
+                        'status': 'completed',
+                        'file_path': final_path
+                    })
             
             # Update database
             try:
@@ -559,14 +606,36 @@ def background_download(song_title, artist, session_id, video_id, download_dir, 
                 ''', (final_path, download_url, song_title, artist))
                 conn.commit()
                 conn.close()
-                logger.info(f"Database updated with download info")
+                logger.info(f"Database updated with download info for {song_title}")
             except Exception as db_err:
                 logger.error(f"Failed to update download info in database: {db_err}")
+            
+            # Verify the file is there and log its details
+            if os.path.exists(final_path):
+                file_size = os.path.getsize(final_path)
+                logger.info(f"Download completed - File: {final_path}, Size: {file_size} bytes")
+            else:
+                logger.error(f"Final file not found after copy: {final_path}")
+                
         else:
             logger.error(f"Download failed or file not found: {download_path}")
-            
+            # Update progress with failure status
+            with progress_lock:
+                if session_id in download_progress:
+                    download_progress[session_id].update({
+                        'status': 'failed',
+                        'message': 'Download failed or file not found'
+                    })
+    
     except Exception as e:
         logger.error(f"Background download failed: {str(e)}", exc_info=True)
+        # Update progress with error information
+        with progress_lock:
+            if session_id in download_progress:
+                download_progress[session_id].update({
+                    'status': 'error',
+                    'message': str(e)
+                })
 
 @app.route('/download-progress/<session_id>')
 def get_download_progress(session_id):
@@ -622,9 +691,10 @@ def check_memory():
     except Exception:
         return False
 
-def cleanup_download(file_path, dir_path, timeout=CLEANUP_TIMEOUT):
+def cleanup_download(file_path, dir_path):
     """Clean up downloaded files after a delay"""
-    time.sleep(timeout)  # Wait for the timeout period
+    # Extended delay for Railway's ephemeral filesystem - 30 minutes
+    time.sleep(30 * 60)  # 30 minutes delay to ensure download completes and is available
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -712,8 +782,8 @@ def progress_hook(d, session_id):
         if d['status'] == 'downloading':
             downloaded = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            speed = d.get('speed', 0)
-            eta = d.get('eta', 0)
+            speed = d.get('speed', 0) or 0
+            eta = d.get('eta', 0) or 0
             
             if total > 0:
                 progress = (downloaded / total) * 100
@@ -721,28 +791,30 @@ def progress_hook(d, session_id):
                 progress = 0
                 
             with progress_lock:
-                download_progress[session_id] = {
-                    'progress': progress,
-                    'speed': speed,
-                    'eta': eta,
-                    'downloaded': downloaded,
-                    'total': total,
-                    'status': 'downloading'
-                }
+                if session_id in download_progress:
+                    download_progress[session_id].update({
+                        'progress': progress,
+                        'speed': speed,
+                        'eta': eta,
+                        'downloaded': downloaded,
+                        'total': total,
+                        'status': 'downloading'
+                    })
                 
-            logger.info(f"Download progress: {progress:.1f}% @ {speed/1024:.1f}KB/s")
+            logger.info(f"Download progress for session {session_id}: {progress:.1f}% @ {speed/1024:.1f}KB/s")
         
         elif d['status'] == 'finished':
             with progress_lock:
-                download_progress[session_id] = {
-                    'progress': 100,
-                    'speed': 0,
-                    'eta': 0,
-                    'downloaded': 1,
-                    'total': 1,
-                    'status': 'finished'
-                }
-            logger.info("Download finished")
+                if session_id in download_progress:
+                    download_progress[session_id].update({
+                        'progress': 100,
+                        'speed': 0,
+                        'eta': 0,
+                        'downloaded': 1,
+                        'total': 1,
+                        'status': 'finished'
+                    })
+            logger.info(f"Download finished for session {session_id}")
             
     except Exception as e:
         logger.error(f"Error in progress hook: {str(e)}")
@@ -751,27 +823,25 @@ def download_song(song_title, artist, session_id, video_id):
     """Download a song from YouTube and convert it to MP3"""
     try:
         with progress_lock:
-            download_progress[session_id] = {
-                'progress': 0,
-                'speed': 0,
-                'eta': 0,
-                'status': 'starting'
-            }
+            if session_id in download_progress:
+                download_progress[session_id].update({
+                    'progress': 0,
+                    'speed': 0,
+                    'eta': 0,
+                    'status': 'starting'
+                })
         
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Create a temporary download directory for this process
-        temp_download_dir = os.path.join(tempfile.gettempdir(), f"beatsnatch_tmp_{session_id}")
-        os.makedirs(temp_download_dir, exist_ok=True)
-        logger.info(f"Created temporary download directory: {temp_download_dir}")
+        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        os.makedirs(download_dir, exist_ok=True)
 
         # Create a safe filename
         sanitized_title = sanitize_filename(f"{song_title} - {artist}")
-        output_template = os.path.join(temp_download_dir, f"{sanitized_title}.%(ext)s")
+        output_template = os.path.join(download_dir, f"{sanitized_title}.%(ext)s")
 
         logger.info(f"Starting download from {video_url} to {output_template}")
 
-        # Configure yt-dlp
+        # Configure yt-dlp with more robust error handling
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': output_template,
@@ -791,72 +861,90 @@ def download_song(song_title, artist, session_id, video_id):
             'retry_sleep': 5,
             'socket_timeout': 30,
             'http_chunk_size': 10485760,  # 10MB chunks
+            'external_downloader_args': ['-retry', '10'],
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36',
             }
         }
 
-        # Try different download approaches in order of preference
+        # Try different download approaches with enhanced error handling
         downloaded_file = None
-        download_succeeded = False
         
-        # First attempt - normal approach
         try:
+            logger.info(f"Starting primary download approach for {video_url}")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 if info:
                     # Get the path to the downloaded file
-                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                    downloaded_file = os.path.join(download_dir, f"{sanitized_title}.mp3")
                     if os.path.exists(downloaded_file):
                         logger.info(f"Download completed: {downloaded_file}")
-                        download_succeeded = True
+                        return downloaded_file
         except Exception as e:
-            logger.error(f"First download attempt failed: {str(e)}")
+            logger.error(f"Primary download approach failed: {str(e)}")
             
-        # Second attempt - fallback approach with m4a format
-        if not download_succeeded:
+        # Try fallback approach if the first one failed
+        if not downloaded_file or not os.path.exists(downloaded_file):
             try:
-                logger.info("Trying fallback method with m4a format")
-                ydl_opts['format'] = 'bestaudio[ext=m4a]'
+                logger.info(f"Trying fallback approach 1 for {video_url}")
+                ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(video_url, download=True)
-                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                    downloaded_file = os.path.join(download_dir, f"{sanitized_title}.mp3")
                     if os.path.exists(downloaded_file):
                         logger.info(f"Fallback download completed: {downloaded_file}")
-                        download_succeeded = True
+                        return downloaded_file
             except Exception as e2:
-                logger.error(f"Fallback download failed: {str(e2)}")
+                logger.error(f"Fallback approach 1 failed: {str(e2)}")
                 
-        # Third attempt - final fallback with worstaudio
-        if not download_succeeded:
-            try:
-                logger.info("Trying final fallback method with worstaudio")
-                ydl_opts['format'] = 'worstaudio'
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(video_url, download=True)
-                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
-                    if os.path.exists(downloaded_file):
-                        logger.info(f"Final fallback download completed: {downloaded_file}")
-                        download_succeeded = True
-            except Exception as e3:
-                logger.error(f"All download attempts failed: {str(e3)}")
+                # Final attempt with worstaudio
+                try:
+                    logger.info(f"Trying final fallback approach for {video_url}")
+                    ydl_opts['format'] = 'worstaudio'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(video_url, download=True)
+                        downloaded_file = os.path.join(download_dir, f"{sanitized_title}.mp3")
+                        if os.path.exists(downloaded_file):
+                            logger.info(f"Final fallback download completed: {downloaded_file}")
+                            return downloaded_file
+                except Exception as e3:
+                    logger.error(f"All download attempts failed: {str(e3)}")
         
-        # Final check if download succeeded
-        if not download_succeeded or not downloaded_file or not os.path.exists(downloaded_file):
-            logger.error("Download failed after all attempts")
-            return None
+        # Even after all attempts, check if the file exists
+        expected_file = os.path.join(download_dir, f"{sanitized_title}.mp3")
+        if os.path.exists(expected_file):
+            logger.info(f"Despite errors, file was found at: {expected_file}")
+            return expected_file
+        
+        # List directory contents to debug
+        try:
+            files = os.listdir(download_dir)
+            logger.info(f"Files in download directory: {files}")
+            # If there's any MP3 file, return the first one
+            mp3_files = [f for f in files if f.endswith('.mp3')]
+            if mp3_files:
+                found_file = os.path.join(download_dir, mp3_files[0])
+                logger.info(f"Found MP3 file to use: {found_file}")
+                return found_file
+        except Exception as e:
+            logger.error(f"Error listing directory: {str(e)}")
             
-        return downloaded_file
+        raise Exception("Failed to download song after multiple attempts")
 
     except Exception as e:
         logger.error(f"Error during song download: {str(e)}", exc_info=True)
         return None
     finally:
-        # Make sure we always clean up progress even if download fails
-        threading.Timer(
-            CLEANUP_TIMEOUT,  # Clean up progress after timeout
-            lambda: progress_lock.acquire() and progress_lock.release() if session_id in download_progress and progress_lock.acquire() and download_progress.pop(session_id, None) is not None else None
-        ).start()
+        # Make sure we always keep the progress information for at least 30 minutes
+        # so we don't delete it too soon
+        def cleanup_progress():
+            time.sleep(30 * 60)  # 30 minutes
+            with progress_lock:
+                if session_id in download_progress:
+                    download_progress.pop(session_id, None)
+                    logger.info(f"Cleaned up progress for session {session_id}")
+        
+        threading.Thread(target=cleanup_progress, daemon=True).start()
 
 # Run periodic cleanup every hour
 def start_cleanup_scheduler():
@@ -875,11 +963,15 @@ def start_cleanup_scheduler():
 def cleanup_old_downloads():
     """Remove old downloads to free up disk space"""
     try:
+        # For Railway, be more aggressive with cleanup but still keep recent files
+        # Files older than 1 hour (3600 seconds) get removed
+        retention_time = 3600 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production' else 86400
+        
         for root, dirs, files in os.walk(DOWNLOAD_FOLDER):
             for file in files:
                 file_path = os.path.join(root, file)
-                # Remove files older than 24 hours
-                if os.path.isfile(file_path) and (time.time() - os.path.getmtime(file_path)) > 86400:
+                # Check if file is older than retention time
+                if os.path.isfile(file_path) and (time.time() - os.path.getmtime(file_path)) > retention_time:
                     try:
                         os.remove(file_path)
                         logger.info(f"Removed old file: {file_path}")
@@ -926,4 +1018,4 @@ if __name__ == '__main__':
     else:
         # Development mode
         logger.info(f"Starting development server on port {port}")
-        app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+        app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
