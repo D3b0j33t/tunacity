@@ -31,6 +31,13 @@ else:
     # fallback for legacy, but should not happen on Railway/Nixpacks
     os.environ["FFMPEG_BINARY"] = "ffmpeg"
 
+# Dynamically find ffprobe binary path
+ffprobe_path = shutil.which("ffprobe")
+if ffprobe_path:
+    os.environ["FFPROBE_BINARY"] = ffprobe_path
+else:
+    os.environ["FFPROBE_BINARY"] = "ffprobe"
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
