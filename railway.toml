@@ -8,7 +8,9 @@ healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
 
 [deploy.envs]
-NIXPACKS_APT_PKGS = "ffmpeg"
+NIXPACKS_APT_PKGS = "ffmpeg python3-dev"
+RAILWAY_ENVIRONMENT = "production"
+FFMPEG_PATH = "/usr/bin/ffmpeg"
 
 [nixpacks]
 python-version = "3.11"

@@ -16,6 +16,8 @@ import contextlib
 from threading import Lock
 import urllib.parse
 from dotenv import load_dotenv
+import subprocess
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -47,6 +49,19 @@ progress_lock = Lock()
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def check_ffmpeg():
+    try:
+        # Check if ffmpeg is available
+        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except FileNotFoundError:
+        logger.warning("FFmpeg not found in PATH")
+        return False
+
+# Check for FFmpeg availability
+if not check_ffmpeg():
+    logger.warning("FFmpeg not found. Some features may not work correctly.")
 
 @app.route('/')
 def index():
@@ -287,6 +302,9 @@ def search_spotify(song_title, artist):
 # Download song function
 def download_song(song_title, artist, session_id, video_id):
     try:
+        # Get FFmpeg path from environment or use default
+        ffmpeg_path = os.environ.get('FFMPEG_PATH', 'ffmpeg')
+        
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
         os.makedirs(download_dir, exist_ok=True)
@@ -313,6 +331,7 @@ def download_song(song_title, artist, session_id, video_id):
             }],
             'progress_hooks': [progress_hook],
             'prefer_ffmpeg': True,
+            'ffmpeg_location': ffmpeg_path,
             'socket_timeout': 30,
         }
         
@@ -360,8 +379,11 @@ def cleanup_old_downloads():
         logger.error(f"Error during cleanup: {str(e)}")
 
 if __name__ == '__main__':
-    # Use PORT environment variable for Railway compatibility
     port = int(os.environ.get('PORT', 5000))
-    # In production, debug should always be False
-    debug = os.environ.get('FLASK_DEBUG', '0') == '1'
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
+        # Use production server
+        from waitress import serve
+        serve(app, host='0.0.0.0', port=port)
+    else:
+        # Use development server
+        app.run(host='0.0.0.0', port=port, debug=False)
