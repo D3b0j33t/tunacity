@@ -254,7 +254,11 @@ def cleanup_download(file_path, dir_path):
 async def recognize_song(file_path):
     shazam = Shazam()
     try:
-        return await shazam.recognize(file_path)
+        # Using the correct method from ShazamIO library
+        out = await shazam.recognize_song(file_path)
+        if out and out.get('track'):
+            return out
+        return None
     except Exception as e:
         logger.error(f"Error recognizing song: {str(e)}")
         return None
