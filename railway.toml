@@ -8,7 +8,7 @@ healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
 
 [deploy.envs]
-NIXPACKS_APT_PKGS = "ffmpeg python3-dev"
+NIXPACKS_APT_PKGS = "ffmpeg python3-dev build-essential libffi-dev libssl-dev"
 RAILWAY_ENVIRONMENT = "production"
 FFMPEG_PATH = "/usr/bin/ffmpeg"
 

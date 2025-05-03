@@ -429,9 +429,9 @@ def cleanup_old_downloads():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))  # Change default port to 8080
     if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-        # Use production server with SSL context
+        # Use production server
         from waitress import serve
-        serve(app, host='0.0.0.0', port=port, url_scheme='https')
+        serve(app, host='0.0.0.0', port=port)
     else:
         # Use development server
         app.run(host='0.0.0.0', port=port, debug=False)
