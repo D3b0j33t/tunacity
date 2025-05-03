@@ -220,16 +220,16 @@ def download():
         # Generate a session ID for this download
         session_id = str(uuid.uuid4())
         
-        # Get video ID from request if provided, otherwise search for it
-        video_id = data.get('videoId')
-        if not video_id:
-            result = search_youtube(song_title, artist)
-            if not result or 'video_id' not in result:
-                return jsonify({
-                    "success": False,
-                    "message": "Couldn't find this song on YouTube"
-                }), 404
-            video_id = result['video_id']
+        # Get video ID from YouTube search
+        result = search_youtube(song_title, artist)
+        if not result or 'video_id' not in result:
+            return jsonify({
+                "success": False,
+                "message": "Couldn't find this song on YouTube"
+            }), 404
+            
+        video_id = result['video_id']
+        logger.info(f"Found YouTube video ID: {video_id} for {song_title} - {artist}")
             
         download_path = download_song(song_title, artist, session_id, video_id)
         
@@ -238,12 +238,15 @@ def download():
             filename = os.path.basename(download_path)
             download_url = f"/get_download/{session_id}/{filename}"
             
+            logger.info(f"Download ready: {download_url}")
             return jsonify({
                 "success": True,
                 "downloadUrl": download_url,
-                "filename": filename
+                "filename": filename,
+                "sessionId": session_id
             }), 200
         else:
+            logger.error("Download failed: No download path or file doesn't exist")
             return jsonify({
                 "success": False,
                 "message": "Failed to download the song. Please try again."
@@ -352,7 +355,6 @@ def search_spotify(song_title, artist):
 # Download song function
 def download_song(song_title, artist, session_id, video_id):
     try:
-        # Always use the dynamically detected ffmpeg_path
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
         os.makedirs(download_dir, exist_ok=True)
@@ -360,54 +362,39 @@ def download_song(song_title, artist, session_id, video_id):
         sanitized_title = sanitize_filename(f"{song_title} - {artist}")
         output_template = os.path.join(download_dir, f"{sanitized_title}.%(ext)s")
 
-        def progress_hook(d):
-            if d['status'] == 'downloading':
-                with progress_lock:
-                    download_progress[session_id] = {
-                        'progress': d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100 if d.get('total_bytes') else 0,
-                        'speed': d.get('speed', 0),
-                        'eta': d.get('eta', 0)
-                    }
+        logger.info(f"Starting download from {video_url} to {output_template}")
 
         ydl_opts = {
-            'format': 'bestaudio',
+            'format': 'bestaudio/best',
             'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'progress_hooks': [progress_hook],
+            'progress_hooks': [lambda d: progress_hook(d, session_id)],
             'prefer_ffmpeg': True,
-            'ffmpeg_location': ffmpeg_path or "ffmpeg",
-            'socket_timeout': 30,
+            'ffmpeg_location': ffmpeg_path or 'ffmpeg',
             'no_warnings': True,
-            'quiet': True,
-            'extract_audio': True,
-            'audio_format': 'mp3',
-            'audio_quality': '192K',
-            'nocheckcertificate': True,
-            'ignoreerrors': False,
-            'geo_bypass': True,
-            'force_generic_extractor': False
+            'quiet': True
         }
-
-        logger.info(f"Starting download for {video_url}")
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                info_dict = ydl.extract_info(video_url, download=True)
-                if not info_dict:
+                logger.info("Extracting video info...")
+                info = ydl.extract_info(video_url, download=True)
+                if not info:
                     logger.error("No video information extracted")
                     return None
 
-                downloaded_file = os.path.splitext(ydl.prepare_filename(info_dict))[0] + ".mp3"
+                # Get the final filepath
+                downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                logger.info(f"Download completed: {downloaded_file}")
 
                 if not os.path.exists(downloaded_file):
                     logger.error(f"Downloaded file not found at {downloaded_file}")
                     return None
 
-                logger.info(f"Successfully downloaded to {downloaded_file}")
                 return downloaded_file
 
             except Exception as e:
@@ -417,10 +404,25 @@ def download_song(song_title, artist, session_id, video_id):
     except Exception as e:
         logger.error(f"Error during song download: {str(e)}")
         return None
-    finally:
-        with progress_lock:
-            if session_id in download_progress:
-                del download_progress[session_id]
+
+def progress_hook(d, session_id):
+    try:
+        if d['status'] == 'downloading':
+            with progress_lock:
+                download_progress[session_id] = {
+                    'progress': (d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100) if d.get('total_bytes') else 0,
+                    'speed': d.get('speed', 0),
+                    'eta': d.get('eta', 0)
+                }
+        elif d['status'] == 'finished':
+            with progress_lock:
+                download_progress[session_id] = {
+                    'progress': 100,
+                    'speed': 0,
+                    'eta': 0
+                }
+    except Exception as e:
+        logger.error(f"Error in progress hook: {str(e)}")
 
 @app.route('/download-progress/<session_id>')
 def get_download_progress(session_id):
