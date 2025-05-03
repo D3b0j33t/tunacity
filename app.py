@@ -17,13 +17,19 @@ from threading import Lock
 import urllib.parse
 from dotenv import load_dotenv
 import subprocess
+import shutil
 
 # Load environment variables
 load_dotenv()
 
-# Ensure /usr/bin is in PATH and set FFMPEG_BINARY for pydub and others
-os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
-os.environ["FFMPEG_BINARY"] = "/usr/bin/ffmpeg"
+# Dynamically find ffmpeg binary path
+ffmpeg_path = shutil.which("ffmpeg")
+if (ffmpeg_path):
+    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + ":" + os.environ.get("PATH", "")
+    os.environ["FFMPEG_BINARY"] = ffmpeg_path
+else:
+    # fallback for legacy, but should not happen on Railway/Nixpacks
+    os.environ["FFMPEG_BINARY"] = "ffmpeg"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -78,7 +84,7 @@ def allowed_file(filename):
 def check_ffmpeg():
     try:
         # Check if ffmpeg is available
-        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run([os.environ.get("FFMPEG_BINARY", "ffmpeg"), '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return True
     except FileNotFoundError:
         logger.warning("FFmpeg not found in PATH")
