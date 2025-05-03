@@ -383,10 +383,6 @@ def search_spotify(song_title, artist):
 # Download song function
 def download_song(song_title, artist, session_id, video_id):
     try:
-        # Ensure temp directories exist
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
-        
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
         os.makedirs(download_dir, exist_ok=True)
@@ -397,64 +393,61 @@ def download_song(song_title, artist, session_id, video_id):
         logger.info(f"Starting download from {video_url} to {output_template}")
 
         ydl_opts = {
-            'format': 'bestaudio[filesize<50M]/worstaudio/bestaudio',  # Limit filesize and add fallbacks
+            'format': 'm4a/mp4/webm',  # Changed format selection
             'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '128',  # Reduced quality for faster download
+                'preferredquality': '128',
             }],
             'progress_hooks': [lambda d: progress_hook(d, session_id)],
             'prefer_ffmpeg': True,
-            'ffmpeg_location': ffmpeg_path,
-            'quiet': False,  # Enable output for debugging
+            'ffmpeg_location': '/usr/bin/ffmpeg',  # Explicit path
+            'quiet': False,
+            'verbose': True,  # Added for debugging
             'no_warnings': False,
             'nocheckcertificate': True,
+            'no_check_certificate': True,
             'ignoreerrors': True,
-            'no_color': True,
-            'noprogress': False,
-            'buffersize': 1024,  # Reduced buffer size
-            'http_chunk_size': 1024*10,  # Reduced chunk size
-            'retries': 5,
-            'fragment_retries': 5,
-            'skip_download': False,
-            'format_sort': ['abr'],
-            'concurrent_fragment_downloads': 1,  # Reduced concurrency
             'geo_bypass': True,
-            'socket_timeout': 30,
-            'extractor_retries': 3,
+            'geo_bypass_country': 'US',
+            'extractor_retries': 5,
+            'retries': 5,
+            'http_chunk_size': 10485760,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate',
-                'Origin': 'https://www.youtube.com',
-                'Referer': 'https://www.youtube.com/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'DNT': '1',
+                'Connection': 'keep-alive',
             }
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                # First try to extract info
-                info = ydl.extract_info(video_url, download=False)
-                if not info:
-                    raise Exception("Could not extract video info")
-
-                # Download with progress tracking
+                # First try with basic format
+                logger.info("Attempting download with basic format...")
                 info = ydl.extract_info(video_url, download=True)
-                downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                
+                if not info:
+                    # Try alternate format
+                    logger.info("Trying alternate format...")
+                    ydl_opts['format'] = 'bestaudio[ext=m4a]'
+                    info = ydl.extract_info(video_url, download=True)
 
-                if os.path.exists(downloaded_file):
-                    logger.info(f"Download completed: {downloaded_file}")
-                    return downloaded_file
-                else:
-                    raise Exception(f"Output file not found: {downloaded_file}")
+                if info:
+                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                    if os.path.exists(downloaded_file):
+                        logger.info(f"Download completed: {downloaded_file}")
+                        return downloaded_file
+                
+                raise Exception("Failed to download with both formats")
 
             except Exception as e:
                 logger.error(f"Download error: {str(e)}")
-                # Try alternate format
                 try:
+                    # Final fallback to lowest quality
                     ydl_opts['format'] = 'worstaudio'
-                    ydl_opts['postprocessors'][0]['preferredquality'] = '96'
                     info = ydl.extract_info(video_url, download=True)
                     downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
                     if os.path.exists(downloaded_file):

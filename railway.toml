@@ -8,7 +8,8 @@ healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
 
 [deploy.envs]
-NIXPACKS_APT_PKGS = "ffmpeg python3-dev build-essential libffi-dev libssl-dev portaudio19-dev"
+NIXPACKS_INSTALL_CMD = "apt-get update && apt-get install -y ffmpeg"
+NIXPACKS_APT_PKGS = "python3-dev build-essential libffi-dev libssl-dev portaudio19-dev"
 RAILWAY_ENVIRONMENT = "production"
 FFMPEG_PATH = "/usr/bin/ffmpeg"
 FFPROBE_PATH = "/usr/bin/ffprobe"
