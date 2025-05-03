@@ -1,18 +1,16 @@
-from flask import Flask, render_template, request, jsonify, send_file, Response, after_this_request
-# from flask_talisman import Talismanan
+from flask import Flask, render_template, request, jsonify, send_file, after_this_request
 import os
 import asyncio
 from shazamio import Shazam
 import yt_dlp
 import re
-import requests 
+import requests
 from urllib.parse import quote
 import uuid
 import logging
 import time
 import threading
 from werkzeug.utils import secure_filename
-import contextlib
 from threading import Lock
 import urllib.parse
 from dotenv import load_dotenv
@@ -21,15 +19,18 @@ import shutil
 import sqlite3
 from datetime import datetime
 
-# Load environment variables and configure paths for Railway
-load_dotenv()
-
-# Configure logging first
+# Configure logging first before any other initialization
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
 
 # Railway-specific configuration
 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
@@ -38,130 +39,143 @@ if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
     ffmpeg_path = "/usr/bin/ffmpeg"
     ffprobe_path = "/usr/bin/ffprobe"
 else:
-    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
-    DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', '/tmp/downloads')
+    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', './tmp/uploads')
+    DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', './tmp/downloads')
     ffmpeg_path = os.environ.get('FFMPEG_PATH') or shutil.which("ffmpeg")
     ffprobe_path = os.environ.get('FFPROBE_PATH') or shutil.which("ffprobe")
-
-# Ensure binary paths are set
-if ffmpeg_path:
-    os.environ["FFMPEG_BINARY"] = ffmpeg_path
-    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get("PATH", "")
-if ffprobe_path:
-    os.environ["FFPROBE_BINARY"] = ffprobe_path
-    os.environ["PATH"] = os.path.dirname(ffprobe_path) + os.pathsep + os.environ.get("PATH", "")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__, template_folder='templates', static_folder='static')
-
-# Security headers configuration
-# Talisman(app,p,
-#     content_security_policy={={
-#         'default-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'", , 
-#                        "https://cdnjs.cloudflare.com", , 
-#                        "https://fonts.googleapis.com", , 
-#                        "https://fonts.gstatic.com"],],
-#         'media-src': ["'self'", "blob:"],],
-#         'connect-src': ["'self'"],],
-#         'img-src': ["'self'", "data:", "https:"],],
-#         'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'"],],
-#         'style-src': ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", , 
-#                      "https://cdnjs.cloudflare.com"],],
-#         'font-src': ["'self'", "https://fonts.gstatic.com", , 
-#                     "https://cdnjs.cloudflare.com"]"]
-#     },},
-#     feature_policy={={
-#         'microphone': "'self'",",
-#         'autoplay': "'self'"'"
-#     } }
-# ) )
-
-# Configuration
-MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))
-SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(24).hex())
-
-app.config['SECRET_KEY'] = SECRET_KEY
-app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
-
-ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'webm'}
 
 # Create folders if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
+# Ensure binary paths are set
+if ffmpeg_path:
+    os.environ["FFMPEG_BINARY"] = ffmpeg_path
+    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get("PATH", "")
+    logger.info(f"FFmpeg path set to: {ffmpeg_path}")
+if ffprobe_path:
+    os.environ["FFPROBE_BINARY"] = ffprobe_path
+    os.environ["PATH"] = os.path.dirname(ffprobe_path) + os.pathsep + os.environ.get("PATH", "")
+    logger.info(f"FFprobe path set to: {ffprobe_path}")
+
+# Initialize Flask app
+app = Flask(__name__, template_folder='templates', static_folder='static')
+
+# App configuration
+MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))
+SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+app.config['SECRET_KEY'] = SECRET_KEY
+app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
+
+# Global variables
+ALLOWED_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'webm'}
 download_progress = {}
 progress_lock = Lock()
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-# Add new headers for microphone access
-@app.after_request
-def add_header(response):
-    response.headers['Feature-Policy'] = 'microphone *'
-    response.headers['Permissions-Policy'] = 'microphone=*'
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
-
-# Update the ffmpeg check function
 def check_ffmpeg():
+    """Verify FFmpeg and FFprobe are available and working"""
     try:
-        ffmpeg_result = subprocess.run(
-            [ffmpeg_path or "ffmpeg", '-version'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True
-        )
-        ffprobe_result = subprocess.run(
-            [ffprobe_path or "ffprobe", '-version'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True
-        )
+        for cmd_path, name in [(ffmpeg_path or "ffmpeg", "FFmpeg"), (ffprobe_path or "ffprobe", "FFprobe")]:
+            result = subprocess.run(
+                [cmd_path, '-version'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                timeout=5
+            )
+            logger.info(f"{name} version: {result.stdout.decode('utf-8').splitlines()[0]}")
         return True
-    except (subprocess.SubprocessError, FileNotFoundError) as e:
+    except (subprocess.SubprocessError, FileNotFoundError, TimeoutError) as e:
         logger.error(f"FFmpeg/FFprobe check failed: {str(e)}")
         return False
 
-# Check for FFmpeg availability
-if not check_ffmpeg():
-    logger.warning("FFmpeg not found. Some features may not work correctly.")
-
 def initialize_database():
-    db_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(db_dir, exist_ok=True)
-    db_path = os.path.join(db_dir, "song_library.db")
+    """Initialize the SQLite database"""
+    try:
+        db_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(db_dir, exist_ok=True)
+        db_path = os.path.join(db_dir, "song_library.db")
+        
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Create songs table if it doesn't exist
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS songs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            artist TEXT,
+            file_path TEXT,
+            date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            play_count INTEGER DEFAULT 0,
+            download_url TEXT,
+            metadata TEXT
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Database initialized at {db_path}")
+        return db_path
+    except Exception as e:
+        logger.error(f"Database initialization failed: {str(e)}")
+        # Fallback to in-memory database
+        return ":memory:"
+
+def allowed_file(filename):
+    """Check if the uploaded file has an allowed extension"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def sanitize_filename(filename):
+    """Remove potentially dangerous characters from filenames"""
+    # First replace spaces with underscores
+    filename = re.sub(r'\s+', '_', filename)
+    # Then remove any remaining special characters
+    return re.sub(r'[\\/*?:"<>|]', "", filename)
+
+# Check for FFmpeg availability early
+ffmpeg_available = check_ffmpeg()
+if not ffmpeg_available:
+    logger.warning("FFmpeg or FFprobe not found or not working. Download functionality will be limited.")
+
+# Initialize database
+db_path = initialize_database()
+logger.info(f"Using database at: {db_path}")
+
+@app.after_request
+def add_header(response):
+    """Add security headers to all responses"""
+    # Enable microphone access
+    response.headers['Feature-Policy'] = 'microphone *'
+    response.headers['Permissions-Policy'] = 'microphone=*'
     
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    # Basic security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
     
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS songs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        artist TEXT,
-        file_path TEXT,
-        date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        play_count INTEGER DEFAULT 0,
-        download_url TEXT,
-        metadata TEXT
-    )
-    ''')
+    # Allow CORS for API endpoints
+    if request.path.startswith(('/recognize', '/youtube-search', '/download', '/download-progress', '/get_download')):
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     
-    conn.commit()
-    conn.close()
-    return db_path
+    return response
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    """Serve the main application page"""
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        logger.error(f"Error rendering index template: {str(e)}")
+        return "Error loading the application. Please check the server logs.", 500
 
 @app.route('/recognize', methods=['POST'])
 def recognize():
+    """Endpoint to recognize a song from an audio file"""
     if 'audio' not in request.files:
         return jsonify({"success": False, "message": "No audio file provided"}), 400
     
@@ -173,21 +187,27 @@ def recognize():
         return jsonify({"success": False, "message": "File type not allowed. Please upload an audio file."}), 400
     
     # Create a unique filename to prevent conflicts
-    filename = secure_filename(audio_file.filename)
-    unique_filename = f"{uuid.uuid4()}_{filename}"
-    file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
-    
     try:
+        filename = secure_filename(audio_file.filename)
+        unique_filename = f"{uuid.uuid4()}_{filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        
         audio_file.save(file_path)
         logger.info(f"Audio saved to {file_path}")
         
         # Recognize the song
-        result = asyncio.run(recognize_song(file_path))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(recognize_song(file_path))
+        loop.close()
         
         # Clean up the uploaded file
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"Temporary file {file_path} removed successfully.")
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Temporary file {file_path} removed successfully")
+        except Exception as cleanup_err:
+            logger.warning(f"Failed to clean up file {file_path}: {cleanup_err}")
         
         if result and 'track' in result:
             song_title = result['track']['title']
@@ -199,6 +219,20 @@ def recognize():
             
             # Get Spotify link
             spotify_url = search_spotify(song_title, artist)
+            
+            # Store song information in the database
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO songs (title, artist, download_url, metadata)
+                    VALUES (?, ?, ?, ?)
+                ''', (song_title, artist, youtube_url, str(result)))
+                conn.commit()
+                conn.close()
+                logger.info(f"Added song to database: {song_title} by {artist}")
+            except Exception as db_err:
+                logger.error(f"Failed to store song in database: {db_err}")
             
             return jsonify({
                 "success": True,
@@ -215,24 +249,30 @@ def recognize():
             }), 400
             
     except Exception as e:
-        logger.error(f"Error during recognition: {str(e)}")
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        logger.error(f"Error during recognition: {str(e)}", exc_info=True)
+        # Clean up any files in case of errors
+        try:
+            if 'file_path' in locals() and os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
+            
         return jsonify({
             "success": False,
-            "message": "An error occurred while processing the audio."
+            "message": "An error occurred while processing the audio. Please try again."
         }), 500
 
 @app.route('/youtube-search', methods=['POST'])
 def youtube_search_endpoint():
-    data = request.json
-    if not data or 'title' not in data or 'artist' not in data:
-        return jsonify({"success": False, "message": "Missing song information"}), 400
-    
-    song_title = data['title']
-    artist = data['artist']
-    
+    """Endpoint to search for a song on YouTube"""
     try:
+        data = request.json
+        if not data or 'title' not in data or 'artist' not in data:
+            return jsonify({"success": False, "message": "Missing song information"}), 400
+        
+        song_title = data['title']
+        artist = data['artist']
+        
         result = search_youtube(song_title, artist)
         
         if not result or 'video_id' not in result:
@@ -251,19 +291,27 @@ def youtube_search_endpoint():
         logger.error(f"Error during YouTube search: {str(e)}")
         return jsonify({
             "success": False,
-            "message": f"An error occurred: {str(e)}"
+            "message": "An error occurred while searching YouTube. Please try again."
         }), 500
 
 @app.route('/download', methods=['POST'])
 def download():
-    data = request.json
-    if not data or 'title' not in data or 'artist' not in data:
-        return jsonify({"success": False, "message": "Missing song information"}), 400
-    
-    song_title = data['title']
-    artist = data['artist']
-    
+    """Endpoint to download a song from YouTube"""
     try:
+        data = request.json
+        if not data or 'title' not in data or 'artist' not in data:
+            return jsonify({"success": False, "message": "Missing song information"}), 400
+        
+        song_title = data['title']
+        artist = data['artist']
+        
+        # Check if FFmpeg is available
+        if not ffmpeg_available:
+            return jsonify({
+                "success": False,
+                "message": "Download functionality unavailable. FFmpeg not found on the server."
+            }), 503
+        
         # Generate a session ID for this download
         session_id = str(uuid.uuid4())
         
@@ -277,80 +325,173 @@ def download():
             
         video_id = result['video_id']
         logger.info(f"Found YouTube video ID: {video_id} for {song_title} - {artist}")
-            
-        download_path = download_song(song_title, artist, session_id, video_id)
         
-        if download_path and os.path.exists(download_path):
-            # Return download info
-            filename = os.path.basename(download_path)
-            download_url = f"/get_download/{session_id}/{filename}"
-            
-            logger.info(f"Download ready: {download_url}")
-            return jsonify({
-                "success": True,
-                "downloadUrl": download_url,
-                "filename": filename,
-                "sessionId": session_id
-            }), 200
-        else:
-            logger.error("Download failed: No download path or file doesn't exist")
-            return jsonify({
-                "success": False,
-                "message": "This Feature is still in development. Please try again later."
-            }), 500
+        # Start the download in a background thread to avoid blocking the request
+        def background_download():
+            try:
+                download_path = download_song(song_title, artist, session_id, video_id)
+                
+                # Update the database with the download path if successful
+                if download_path and os.path.exists(download_path):
+                    try:
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        download_url = f"/get_download/{session_id}/{os.path.basename(download_path)}"
+                        cursor.execute('''
+                            UPDATE songs 
+                            SET file_path = ?, download_url = ?
+                            WHERE title = ? AND artist = ?
+                        ''', (download_path, download_url, song_title, artist))
+                        conn.commit()
+                        conn.close()
+                    except Exception as db_err:
+                        logger.error(f"Failed to update download info in database: {db_err}")
+            except Exception as download_err:
+                logger.error(f"Background download failed: {download_err}")
+        
+        # Start the download thread
+        threading.Thread(target=background_download).start()
+        
+        # Return immediately with the session ID
+        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        os.makedirs(download_dir, exist_ok=True)
+        
+        return jsonify({
+            "success": True,
+            "message": "Download started. Check progress using the provided session ID.",
+            "downloadUrl": f"/get_download/{session_id}/",
+            "sessionId": session_id
+        }), 202  # 202 Accepted
     
     except Exception as e:
-        logger.error(f"Error during download: {str(e)}")
+        logger.error(f"Error initiating download: {str(e)}")
         return jsonify({
             "success": False,
-            "message": f"An error occurred: {str(e)}"
+            "message": "An error occurred while preparing your download. Please try again."
         }), 500
 
-@app.route('/get_download/<session_id>/<filename>')
+@app.route('/get_download/<session_id>/<path:filename>')
 def get_download(session_id, filename):
-    download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
-    file_path = os.path.join(download_dir, filename)
-    
-    if os.path.exists(file_path):
+    """Serve a downloaded file and clean up after download"""
+    try:
+        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        file_path = os.path.join(download_dir, filename)
+        
+        if not os.path.exists(file_path):
+            logger.warning(f"File not found: {file_path}")
+            
+            # Check if the download is still in progress
+            with progress_lock:
+                if session_id in download_progress:
+                    progress = download_progress.get(session_id, {}).get('progress', 0)
+                    return jsonify({
+                        "success": False,
+                        "message": f"Download in progress: {progress:.1f}% complete. Please try again later."
+                    }), 202
+            
+            return jsonify({
+                "success": False,
+                "message": "File not found or already downloaded"
+            }), 404
+        
         # Schedule cleanup of files after download completes
         @after_this_request
         def cleanup(response):
             try:
+                # Start a background thread to clean up later
                 threading.Thread(target=lambda: cleanup_download(file_path, download_dir)).start()
                 logger.info(f"Scheduled cleanup for {file_path} and {download_dir}")
             except Exception as e:
                 logger.error(f"Error in cleanup scheduling: {str(e)}")
             return response
-            
+        
+        # Safe filename for download
+        safe_filename = sanitize_filename(filename)
+        
+        # Update play count in database
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE songs 
+                SET play_count = play_count + 1
+                WHERE file_path = ?
+            ''', (file_path,))
+            conn.commit()
+            conn.close()
+        except Exception as db_err:
+            logger.warning(f"Failed to update play count: {db_err}")
+        
         return send_file(
             file_path,
             as_attachment=True,
-            download_name=filename
+            download_name=safe_filename
         )
-    else:
-        logger.warning(f"File not found: {file_path}")
+    
+    except Exception as e:
+        logger.error(f"Error serving download: {str(e)}")
         return jsonify({
             "success": False,
-            "message": "File not found or already downloaded"
-        }), 404
-        
+            "message": "An error occurred while serving your download"
+        }), 500
+
+@app.route('/download-progress/<session_id>')
+def get_download_progress(session_id):
+    """Get the current progress of a download"""
+    with progress_lock:
+        progress = download_progress.get(session_id, {})
+    return jsonify(progress)
+
+@app.route('/healthz')
+def healthz():
+    """Health check endpoint for Railway and monitoring"""
+    # Check database connection
+    db_ok = False
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        conn.close()
+        db_ok = True
+    except Exception:
+        pass
+    
+    # Check disk space
+    disk_ok = True
+    try:
+        total, used, free = shutil.disk_usage("/")
+        disk_ok = (free / total) > 0.05  # At least 5% free space
+    except Exception:
+        pass
+    
+    health_status = {
+        "status": "OK" if ffmpeg_available and db_ok and disk_ok else "DEGRADED",
+        "ffmpeg": ffmpeg_available,
+        "database": db_ok,
+        "disk": disk_ok,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    status_code = 200 if health_status["status"] == "OK" else 503
+    return jsonify(health_status), status_code
+
 def cleanup_download(file_path, dir_path):
-    time.sleep(60)  # 60 seconds delay
+    """Clean up downloaded files after a delay"""
+    time.sleep(300)  # 5 minutes delay to ensure download completes
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
-            logger.info(f"File {file_path} removed successfully.")
+            logger.info(f"File {file_path} removed successfully")
         if os.path.exists(dir_path) and not os.listdir(dir_path):
             os.rmdir(dir_path)
-            logger.info(f"Directory {dir_path} removed successfully.")
+            logger.info(f"Directory {dir_path} removed successfully")
     except Exception as e:
         logger.error(f"Error cleaning up files: {str(e)}")
 
-# Song recognition function
 async def recognize_song(file_path):
-    shazam = Shazam()
+    """Use ShazamIO to recognize a song from an audio file"""
     try:
-        # Using the correct method from ShazamIO library
+        shazam = Shazam()
         out = await shazam.recognize_song(file_path)
         if out and out.get('track'):
             return out
@@ -359,12 +500,8 @@ async def recognize_song(file_path):
         logger.error(f"Error recognizing song: {str(e)}")
         return None
 
-# Filename sanitization
-def sanitize_filename(filename):
-    return re.sub(r'[\\/*?:"<>|]', "", filename)
-
-# Search YouTube for a song and return the video ID
 def search_youtube(song_title, artist):
+    """Search YouTube for a song and return video information"""
     search_query = f'{song_title} {artist} lyrics'
     query = quote(search_query)
     
@@ -372,26 +509,45 @@ def search_youtube(song_title, artist):
         # Search for video on YouTube
         url = f"https://www.youtube.com/results?search_query={query}"
         
-        # Add a timeout to prevent hanging
-        response = requests.get(url, timeout=10)
+        # Add timeout and user agent
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        video_id_match = re.search(r"watch\?v=(\S{11})", response.text)
+        # Try to find video ID with multiple patterns
+        video_id = None
+        patterns = [
+            r'watch\?v=(\S{11})',
+            r'youtu.be/(\S{11})',
+            r'/embed/(\S{11})',
+            r'/v/(\S{11})',
+        ]
         
-        if not video_id_match:
+        for pattern in patterns:
+            video_id_match = re.search(pattern, response.text)
+            if video_id_match:
+                video_id = video_id_match.group(1)
+                break
+        
+        if not video_id:
             logger.warning(f"No YouTube video found for query: {search_query}")
             return None
             
-        video_id = video_id_match.group(1)
         return {
             "video_id": video_id,
             "video_url": f"https://www.youtube.com/watch?v={video_id}"
         }
+    except requests.RequestException as e:
+        logger.error(f"Request error searching YouTube: {str(e)}")
+        return None
     except Exception as e:
         logger.error(f"Error searching YouTube: {str(e)}")
         return None
 
 def search_spotify(song_title, artist):
+    """Create a Spotify search URL for a song"""
     try:
         query = urllib.parse.quote(f"{song_title} {artist}")
         return f"https://open.spotify.com/search/{query}"
@@ -399,92 +555,8 @@ def search_spotify(song_title, artist):
         logger.error(f"Error creating Spotify search URL: {str(e)}")
         return None
 
-# Download song function
-def download_song(song_title, artist, session_id, video_id):
-    try:
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
-        os.makedirs(download_dir, exist_ok=True)
-
-        sanitized_title = sanitize_filename(f"{song_title} - {artist}")
-        output_template = os.path.join(download_dir, f"{sanitized_title}.%(ext)s")
-
-        logger.info(f"Starting download from {video_url} to {output_template}")
-
-        ydl_opts = {
-            'format': 'm4a/mp4/webm',  # Changed format selection
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '128',
-            }],
-            'progress_hooks': [lambda d: progress_hook(d, session_id)],
-            'prefer_ffmpeg': True,
-            'ffmpeg_location': '/usr/bin/ffmpeg',  # Explicit path
-            'quiet': False,
-            'verbose': True,  # Added for debugging
-            'no_warnings': False,
-            'nocheckcertificate': True,
-            'no_check_certificate': True,
-            'ignoreerrors': True,
-            'geo_bypass': True,
-            'geo_bypass_country': 'US',
-            'extractor_retries': 5,
-            'retries': 5,
-            'http_chunk_size': 10485760,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-            }
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                # First try with basic format
-                logger.info("Attempting download with basic format...")
-                info = ydl.extract_info(video_url, download=True)
-                
-                if not info:
-                    # Try alternate format
-                    logger.info("Trying alternate format...")
-                    ydl_opts['format'] = 'bestaudio[ext=m4a]'
-                    info = ydl.extract_info(video_url, download=True)
-
-                if info:
-                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
-                    if os.path.exists(downloaded_file):
-                        logger.info(f"Download completed: {downloaded_file}")
-                        return downloaded_file
-                
-                raise Exception("Failed to download with both formats")
-
-            except Exception as e:
-                logger.error(f"Download error: {str(e)}")
-                try:
-                    # Final fallback to lowest quality
-                    ydl_opts['format'] = 'worstaudio'
-                    info = ydl.extract_info(video_url, download=True)
-                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
-                    if os.path.exists(downloaded_file):
-                        return downloaded_file
-                except Exception as e2:
-                    logger.error(f"Fallback download failed: {str(e2)}")
-                return None
-
-    except Exception as e:
-        logger.error(f"Error during song download: {str(e)}")
-        return None
-    finally:
-        with progress_lock:
-            if session_id in download_progress:
-                del download_progress[session_id]
-
-# Update progress_hook
 def progress_hook(d, session_id):
+    """Track the progress of downloads"""
     try:
         if d['status'] == 'downloading':
             downloaded = d.get('downloaded_bytes', 0)
@@ -503,7 +575,8 @@ def progress_hook(d, session_id):
                     'speed': speed,
                     'eta': eta,
                     'downloaded': downloaded,
-                    'total': total
+                    'total': total,
+                    'status': 'downloading'
                 }
                 
             logger.info(f"Download progress: {progress:.1f}% @ {speed/1024:.1f}KB/s")
@@ -515,49 +588,176 @@ def progress_hook(d, session_id):
                     'speed': 0,
                     'eta': 0,
                     'downloaded': 1,
-                    'total': 1
+                    'total': 1,
+                    'status': 'finished'
                 }
             logger.info("Download finished")
             
     except Exception as e:
         logger.error(f"Error in progress hook: {str(e)}")
 
-@app.route('/download-progress/<session_id>')
-def get_download_progress(session_id):
-    with progress_lock:
-        progress = download_progress.get(session_id, {})
-    return jsonify(progress)
+def download_song(song_title, artist, session_id, video_id):
+    """Download a song from YouTube and convert it to MP3"""
+    try:
+        with progress_lock:
+            download_progress[session_id] = {
+                'progress': 0,
+                'speed': 0,
+                'eta': 0,
+                'status': 'starting'
+            }
+        
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        os.makedirs(download_dir, exist_ok=True)
 
-# Periodic cleanup function (can be executed with a scheduler in production)
+        # Create a safe filename
+        sanitized_title = sanitize_filename(f"{song_title} - {artist}")
+        output_template = os.path.join(download_dir, f"{sanitized_title}.%(ext)s")
+
+        logger.info(f"Starting download from {video_url} to {output_template}")
+
+        # Configure yt-dlp
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_template,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'progress_hooks': [lambda d: progress_hook(d, session_id)],
+            'prefer_ffmpeg': True,
+            'ffmpeg_location': ffmpeg_path,
+            'quiet': False,
+            'verbose': True,
+            'no_warnings': False,
+            'ignoreerrors': True,
+            'retries': 10,
+            'retry_sleep': 5,
+            'socket_timeout': 30,
+            'http_chunk_size': 10485760,  # 10MB chunks
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36',
+            }
+        }
+
+        # Try different download approaches in order of preference
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                if info:
+                    # Get the path to the downloaded file
+                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                    if os.path.exists(downloaded_file):
+                        logger.info(f"Download completed: {downloaded_file}")
+                        return downloaded_file
+        except Exception as e:
+            logger.error(f"Primary download approach failed: {str(e)}")
+            
+            # Try fallback approach
+            try:
+                ydl_opts['format'] = 'bestaudio[ext=m4a]'
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=True)
+                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                    if os.path.exists(downloaded_file):
+                        logger.info(f"Fallback download completed: {downloaded_file}")
+                        return downloaded_file
+            except Exception as e2:
+                logger.error(f"Fallback download failed: {str(e2)}")
+                
+                # Final attempt with worstaudio
+                try:
+                    ydl_opts['format'] = 'worstaudio'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(video_url, download=True)
+                        downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                        if os.path.exists(downloaded_file):
+                            logger.info(f"Final fallback download completed: {downloaded_file}")
+                            return downloaded_file
+                except Exception as e3:
+                    logger.error(f"All download attempts failed: {str(e3)}")
+                    
+        raise Exception("Failed to download song after multiple attempts")
+
+    except Exception as e:
+        logger.error(f"Error during song download: {str(e)}", exc_info=True)
+        return None
+    finally:
+        # Make sure we always clean up progress even if download fails
+        threading.Timer(
+            300,  # Clean up progress after 5 minutes
+            lambda: progress_lock.acquire() and progress_lock.release() if session_id in download_progress and progress_lock.acquire() and download_progress.pop(session_id, None) is not None else None
+        ).start()
+
+# Run periodic cleanup every hour
+def start_cleanup_scheduler():
+    """Start a background thread that periodically cleans up old downloads"""
+    def run_cleanup():
+        while True:
+            try:
+                logger.info("Running scheduled cleanup of old downloads")
+                cleanup_old_downloads()
+            except Exception as e:
+                logger.error(f"Error in scheduled cleanup: {str(e)}")
+            time.sleep(3600)  # Run every hour
+            
+    threading.Thread(target=run_cleanup, daemon=True).start()
+
 def cleanup_old_downloads():
+    """Remove old downloads to free up disk space"""
     try:
         for root, dirs, files in os.walk(DOWNLOAD_FOLDER):
             for file in files:
                 file_path = os.path.join(root, file)
-                # Remove files older than 1 hour
-                if os.path.isfile(file_path) and (time.time() - os.path.getmtime(file_path)) > 3600:
-                    os.remove(file_path)
+                # Remove files older than 24 hours
+                if os.path.isfile(file_path) and (time.time() - os.path.getmtime(file_path)) > 86400:
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"Removed old file: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove old file {file_path}: {str(e)}")
         
         # Remove empty directories
         for root, dirs, files in os.walk(DOWNLOAD_FOLDER, topdown=False):
             for dir in dirs:
                 dir_path = os.path.join(root, dir)
                 if not os.listdir(dir_path):
-                    os.rmdir(dir_path)
+                    try:
+                        os.rmdir(dir_path)
+                        logger.info(f"Removed empty directory: {dir_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove directory {dir_path}: {str(e)}")
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
-@app.route('/healthz')
-def healthz():
-    return "OK", 200
+# Start the cleanup scheduler
+start_cleanup_scheduler()
 
 if __name__ == '__main__':
+    # Log startup information
+    logger.info("BeatSnatch starting up...")
+    logger.info(f"Using UPLOAD_FOLDER: {UPLOAD_FOLDER}")
+    logger.info(f"Using DOWNLOAD_FOLDER: {DOWNLOAD_FOLDER}")
+    
+    # Get the port from environment or use default
     port = int(os.environ.get('PORT', 8080))
+    
+    # Railway deployment detection
     if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
         logger.info(f"Starting production server on port {port}")
         logger.info(f"FFMPEG path: {ffmpeg_path}")
         logger.info(f"FFPROBE path: {ffprobe_path}")
-        from waitress import serve
-        serve(app, host='0.0.0.0', port=port)
+        
+        # Use waitress for production
+        try:
+            from waitress import serve
+            serve(app, host='0.0.0.0', port=port, threads=8)
+        except ImportError:
+            logger.warning("Waitress not installed, falling back to Flask's built-in server (not recommended for production)")
+            app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
     else:
-        app.run(host='0.0.0.0', port=port, debug=False)
+        # Development mode
+        logger.info(f"Starting development server on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
