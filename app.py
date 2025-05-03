@@ -383,7 +383,7 @@ def search_spotify(song_title, artist):
 # Download song function
 def download_song(song_title, artist, session_id, video_id):
     try:
-        # Ensure temp directories exist and are writable
+        # Ensure temp directories exist
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
         os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
         
@@ -397,87 +397,64 @@ def download_song(song_title, artist, session_id, video_id):
         logger.info(f"Starting download from {video_url} to {output_template}")
 
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',  # Updated format selection
+            'format': 'bestaudio[filesize<50M]/worstaudio/bestaudio',  # Limit filesize and add fallbacks
             'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                'preferredquality': '128',  # Reduced quality for faster download
             }],
             'progress_hooks': [lambda d: progress_hook(d, session_id)],
             'prefer_ffmpeg': True,
             'ffmpeg_location': ffmpeg_path,
-            'no_warnings': True,
-            'quiet': True,
+            'quiet': False,  # Enable output for debugging
+            'no_warnings': False,
             'nocheckcertificate': True,
-            'ignoreerrors': False,
+            'ignoreerrors': True,
             'no_color': True,
-            'extract_flat': False,
-            'format_sort': ['abr'],  # Sort by average bitrate
+            'noprogress': False,
+            'buffersize': 1024,  # Reduced buffer size
+            'http_chunk_size': 1024*10,  # Reduced chunk size
+            'retries': 5,
+            'fragment_retries': 5,
+            'skip_download': False,
+            'format_sort': ['abr'],
+            'concurrent_fragment_downloads': 1,  # Reduced concurrency
             'geo_bypass': True,
             'socket_timeout': 30,
             'extractor_retries': 3,
-            'http_headers': {  # Add custom headers to avoid 403
+            'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
-            },
-            'external_downloader_args': ['-timeout', '30'],
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
+            }
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                logger.info("Extracting video info...")
-                # First get the info without downloading
+                # First try to extract info
                 info = ydl.extract_info(video_url, download=False)
                 if not info:
-                    logger.error("No video information extracted")
-                    return None
+                    raise Exception("Could not extract video info")
 
-                # Get available formats
-                formats = info.get('formats', [])
-                if not formats:
-                    logger.error("No formats available")
-                    return None
-
-                # Now download with the verified format
+                # Download with progress tracking
                 info = ydl.extract_info(video_url, download=True)
-                
-                # Get the final filepath
                 downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
-                logger.info(f"Download completed: {downloaded_file}")
 
-                if not os.path.exists(downloaded_file):
-                    logger.error(f"Downloaded file not found at {downloaded_file}")
-                    return None
-
-                # Store in database
-                db_path = initialize_database()
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                
-                cursor.execute("""
-                    INSERT INTO songs (title, artist, file_path, download_url, metadata)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    song_title,
-                    artist,
-                    downloaded_file,
-                    video_url,
-                    json.dumps(info)
-                ))
-                
-                conn.commit()
-                conn.close()
-
-                return downloaded_file
+                if os.path.exists(downloaded_file):
+                    logger.info(f"Download completed: {downloaded_file}")
+                    return downloaded_file
+                else:
+                    raise Exception(f"Output file not found: {downloaded_file}")
 
             except Exception as e:
-                logger.error(f"YoutubeDL error: {str(e)}")
-                # Try alternate format if first attempt fails
+                logger.error(f"Download error: {str(e)}")
+                # Try alternate format
                 try:
-                    ydl_opts['format'] = 'worstaudio/worst'  # Try with lowest quality as fallback
+                    ydl_opts['format'] = 'worstaudio'
+                    ydl_opts['postprocessors'][0]['preferredquality'] = '96'
                     info = ydl.extract_info(video_url, download=True)
                     downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
                     if os.path.exists(downloaded_file):
@@ -494,22 +471,42 @@ def download_song(song_title, artist, session_id, video_id):
             if session_id in download_progress:
                 del download_progress[session_id]
 
+# Update progress_hook
 def progress_hook(d, session_id):
     try:
         if d['status'] == 'downloading':
+            downloaded = d.get('downloaded_bytes', 0)
+            total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+            speed = d.get('speed', 0)
+            eta = d.get('eta', 0)
+            
+            if total > 0:
+                progress = (downloaded / total) * 100
+            else:
+                progress = 0
+                
             with progress_lock:
                 download_progress[session_id] = {
-                    'progress': (d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100) if d.get('total_bytes') else 0,
-                    'speed': d.get('speed', 0),
-                    'eta': d.get('eta', 0)
+                    'progress': progress,
+                    'speed': speed,
+                    'eta': eta,
+                    'downloaded': downloaded,
+                    'total': total
                 }
+                
+            logger.info(f"Download progress: {progress:.1f}% @ {speed/1024:.1f}KB/s")
+        
         elif d['status'] == 'finished':
             with progress_lock:
                 download_progress[session_id] = {
                     'progress': 100,
                     'speed': 0,
-                    'eta': 0
+                    'eta': 0,
+                    'downloaded': 1,
+                    'total': 1
                 }
+            logger.info("Download finished")
+            
     except Exception as e:
         logger.error(f"Error in progress hook: {str(e)}")
 
