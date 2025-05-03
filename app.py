@@ -18,33 +18,38 @@ import urllib.parse
 from dotenv import load_dotenv
 import subprocess
 import shutil
+import sqlite3
+from datetime import datetime
 
-# Load environment variables
+# Load environment variables and configure paths for Railway
 load_dotenv()
 
-# Dynamically find ffmpeg binary path
-ffmpeg_path = os.environ.get('FFMPEG_PATH') or shutil.which("ffmpeg")
+# Configure logging first
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Railway-specific configuration
+if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
+    UPLOAD_FOLDER = '/tmp/uploads'
+    DOWNLOAD_FOLDER = '/tmp/downloads'
+    ffmpeg_path = "/usr/bin/ffmpeg"
+    ffprobe_path = "/usr/bin/ffprobe"
+else:
+    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
+    DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', '/tmp/downloads')
+    ffmpeg_path = os.environ.get('FFMPEG_PATH') or shutil.which("ffmpeg")
+    ffprobe_path = os.environ.get('FFPROBE_PATH') or shutil.which("ffprobe")
+
+# Ensure binary paths are set
 if ffmpeg_path:
-    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get("PATH", "")
     os.environ["FFMPEG_BINARY"] = ffmpeg_path
-else:
-    logger.warning("FFmpeg not found in PATH")
-    os.environ["FFMPEG_BINARY"] = "ffmpeg"
-
-# Dynamically find ffprobe binary path
-ffprobe_path = os.environ.get('FFPROBE_PATH') or shutil.which("ffprobe")
-if not ffprobe_path and ffmpeg_path:
-    # Look in same directory as ffmpeg
-    candidate = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe")
-    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-        ffprobe_path = candidate
-
+    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get("PATH", "")
 if ffprobe_path:
-    os.environ["PATH"] = os.path.dirname(ffprobe_path) + os.pathsep + os.environ.get("PATH", "")
     os.environ["FFPROBE_BINARY"] = ffprobe_path
-else:
-    logger.warning("FFprobe not found in PATH")
-    os.environ["FFPROBE_BINARY"] = "ffprobe"
+    os.environ["PATH"] = os.path.dirname(ffprobe_path) + os.pathsep + os.environ.get("PATH", "")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -75,8 +80,6 @@ app = Flask(__name__, template_folder='templates', static_folder='static')
 # ) )
 
 # Configuration
-UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
-DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', '/tmp/downloads')
 MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))
 SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 
@@ -108,6 +111,31 @@ def check_ffmpeg():
 # Check for FFmpeg availability
 if not check_ffmpeg():
     logger.warning("FFmpeg not found. Some features may not work correctly.")
+
+def initialize_database():
+    db_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "song_library.db")
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS songs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        artist TEXT,
+        file_path TEXT,
+        date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        play_count INTEGER DEFAULT 0,
+        download_url TEXT,
+        metadata TEXT
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    return db_path
 
 @app.route('/')
 def index():
@@ -355,6 +383,10 @@ def search_spotify(song_title, artist):
 # Download song function
 def download_song(song_title, artist, session_id, video_id):
     try:
+        # Ensure temp directories exist and are writable
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+        
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
         os.makedirs(download_dir, exist_ok=True)
@@ -419,6 +451,25 @@ def download_song(song_title, artist, session_id, video_id):
                 if not os.path.exists(downloaded_file):
                     logger.error(f"Downloaded file not found at {downloaded_file}")
                     return None
+
+                # Store in database
+                db_path = initialize_database()
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO songs (title, artist, file_path, download_url, metadata)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    song_title,
+                    artist,
+                    downloaded_file,
+                    video_url,
+                    json.dumps(info)
+                ))
+                
+                conn.commit()
+                conn.close()
 
                 return downloaded_file
 
@@ -494,6 +545,9 @@ def healthz():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
+        logger.info(f"Starting production server on port {port}")
+        logger.info(f"FFMPEG path: {ffmpeg_path}")
+        logger.info(f"FFPROBE path: {ffprobe_path}")
         from waitress import serve
         serve(app, host='0.0.0.0', port=port)
     else:

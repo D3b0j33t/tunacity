@@ -8,10 +8,13 @@ healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
 
 [deploy.envs]
-NIXPACKS_APT_PKGS = "ffmpeg python3-dev build-essential libffi-dev libssl-dev"
+NIXPACKS_APT_PKGS = "ffmpeg python3-dev build-essential libffi-dev libssl-dev portaudio19-dev"
 RAILWAY_ENVIRONMENT = "production"
 FFMPEG_PATH = "/usr/bin/ffmpeg"
 FFPROBE_PATH = "/usr/bin/ffprobe"
+UPLOAD_FOLDER = "/tmp/uploads"
+DOWNLOAD_FOLDER = "/tmp/downloads"
+MAX_CONTENT_LENGTH = "16777216"  # 16MB in bytes
 
 [nixpacks]
 python-version = "3.11"
