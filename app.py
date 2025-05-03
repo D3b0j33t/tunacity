@@ -82,9 +82,6 @@ if ffprobe_path:
     os.environ["PATH"] = os.path.dirname(ffprobe_path) + os.pathsep + os.environ.get("PATH", "")
     logger.info(f"FFprobe path set to: {ffprobe_path}")
 
-# Initialize Flask app
-app = Flask(__name__, template_folder='templates', static_folder='static')
-
 # App configuration
 MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))
 SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(24).hex())
