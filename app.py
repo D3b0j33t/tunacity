@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_file, Response, after_this_request
-from flask_talisman import Talisman  # Add this import at the top
+from flask_talisman import Talisman
 import os
 import asyncio
 from shazamio import Shazam
@@ -12,16 +12,18 @@ import logging
 import time
 import threading
 from werkzeug.utils import secure_filename
-import tempfile
 import contextlib
 from threading import Lock
 import urllib.parse
 from dotenv import load_dotenv
 import subprocess
-from pathlib import Path
 
 # Load environment variables
 load_dotenv()
+
+# Ensure /usr/bin is in PATH and set FFMPEG_BINARY for pydub and others
+os.environ["PATH"] = "/usr/bin:" + os.environ.get("PATH", "")
+os.environ["FFMPEG_BINARY"] = "/usr/bin/ffmpeg"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
