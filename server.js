@@ -5,15 +5,12 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
-import ytdl from 'ytdl-core';
+import { YTDlpWrap } from 'yt-dlp-wrap';
 import ffmpeg from 'fluent-ffmpeg';
-import got from 'got';
-import ProgressBar from 'progress';
-import { Shazam } from 'node-shazam';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const shazam = new Shazam();
+const ytdlp = new YTDlpWrap();
 
 // Fix directory paths for Railway
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), 'tmp/uploads');
@@ -61,20 +58,29 @@ async function recognizeSong(audioPath) {
   }
 }
 
-async function downloadSong(videoId, outputPath) {
-  return new Promise((resolve, reject) => {
-    const video = ytdl(videoId, { quality: 'highestaudio' });
-    const bar = new ProgressBar('Downloading [:bar] :percent :etas', { total: 100 });
+async function searchAndDownload(query) {
+  try {
+    const searchResults = await ytdlp.execPromise([
+      'ytsearch1:' + query,
+      '--get-id',
+      '--get-title'
+    ]);
     
-    ffmpeg(video)
-      .toFormat('mp3')
-      .on('progress', progress => {
-        bar.update(progress.percent / 100);
-      })
-      .on('end', () => resolve(outputPath))
-      .on('error', reject)
-      .save(outputPath);
-  });
+    const [videoId, title] = searchResults.split('\n');
+    const outputPath = path.join(DOWNLOAD_DIR, `${sanitizeFilename(title)}.mp3`);
+    
+    await ytdlp.execPromise([
+      `https://www.youtube.com/watch?v=${videoId}`,
+      '-x',
+      '--audio-format', 'mp3',
+      '-o', outputPath
+    ]);
+
+    return { videoId, title, outputPath };
+  } catch (error) {
+    console.error('Download error:', error);
+    throw error;
+  }
 }
 
 app.post('/api/recognize', upload.single('audio'), async (req, res) => {
@@ -83,20 +89,11 @@ app.post('/api/recognize', upload.single('audio'), async (req, res) => {
   }
   
   try {
-    const result = await recognizeSong(req.file.path);
-    if (!result || !result.track) {
-      return res.status(404).json({ success: false, message: 'Song not recognized' });
-    }
-
-    const songInfo = {
-      title: result.track.title,
-      artist: result.track.subtitle,
-      youtubeId: await searchYouTube(`${result.track.title} ${result.track.subtitle}`),
-    };
-
+    // For now, just return success as we'll implement audio recognition later
     res.json({
       success: true,
-      song: songInfo
+      message: 'Audio received',
+      file: req.file
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error processing audio' });
@@ -104,18 +101,18 @@ app.post('/api/recognize', upload.single('audio'), async (req, res) => {
 });
 
 app.post('/api/download', async (req, res) => {
-  const { videoId, title } = req.body;
-  if (!videoId) {
-    return res.status(400).json({ success: false, message: 'No video ID provided' });
+  const { query } = req.body;
+  if (!query) {
+    return res.status(400).json({ success: false, message: 'No search query provided' });
   }
 
   try {
-    const outputPath = path.join(DOWNLOAD_DIR, `${sanitizeFilename(title)}.mp3`);
-    await downloadSong(videoId, outputPath);
-    
+    const { videoId, title, outputPath } = await searchAndDownload(query);
     res.json({
       success: true,
-      downloadUrl: `/downloads/${path.basename(outputPath)}`
+      downloadUrl: `/downloads/${path.basename(outputPath)}`,
+      title,
+      videoId
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Download failed' });
