@@ -98,28 +98,40 @@ progress_lock = Lock()
 def check_ffmpeg():
     """Verify FFmpeg and FFprobe are available and working"""
     try:
-        # Example: Check FFmpeg version
-        result = subprocess.run(
+        if not ffmpeg_path or not ffprobe_path:
+            logger.error("FFmpeg or FFprobe paths not set")
+            return False
+
+        # Check FFmpeg
+        ffmpeg_result = subprocess.run(
             [ffmpeg_path, '-version'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
             timeout=5
         )
-        logger.info(f"FFmpeg version: {result.stdout.decode('utf-8').splitlines()[0]}")
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        for cmd_path, name in [(ffmpeg_path or "ffmpeg", "FFmpeg"), (ffprobe_path or "ffprobe", "FFprobe")]:
-            result = subprocess.run(
-                [cmd_path, '-version'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                timeout=5
-            )
-            logger.info(f"{name} version: {result.stdout.decode('utf-8').splitlines()[0]}")
+        logger.info(f"FFmpeg version: {ffmpeg_result.stdout.decode('utf-8').splitlines()[0]}")
+
+        # Check FFprobe
+        ffprobe_result = subprocess.run(
+            [ffprobe_path, '-version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=5
+        )
+        logger.info(f"FFprobe version: {ffprobe_result.stdout.decode('utf-8').splitlines()[0]}")
+
+        # Both checks passed
         return True
-    except (subprocess.SubprocessError, FileNotFoundError, TimeoutError) as e:
+
+    except subprocess.SubprocessError as e:
+        logger.error(f"FFmpeg/FFprobe subprocess error: {str(e)}")
+        return False
+    except FileNotFoundError as e:
+        logger.error(f"FFmpeg/FFprobe not found: {str(e)}")
+        return False
+    except Exception as e:
         logger.error(f"FFmpeg/FFprobe check failed: {str(e)}")
         return False
 
@@ -493,10 +505,15 @@ def get_download_progress(session_id):
 
 @app.route('/healthz')
 def healthz():
+    """Health check endpoint"""
+    # Check FFmpeg first
+    ffmpeg_ok = check_ffmpeg()
+    if not ffmpeg_ok:
+        logger.warning("FFmpeg health check failed")
+    
     status = {
-        "status": "OK",
         "checks": {
-            "ffmpeg": ffmpeg_available,
+            "ffmpeg": ffmpeg_ok,
             "database": check_database(),
             "disk": check_disk_space(),
             "memory": check_memory(),
@@ -504,8 +521,10 @@ def healthz():
         "timestamp": datetime.now().isoformat()
     }
     
-    status["status"] = "OK" if all(status["checks"].values()) else "DEGRADED"
-    return jsonify(status), 200 if status["status"] == "OK" else 503
+    all_checks_ok = all(status["checks"].values())
+    status["status"] = "OK" if all_checks_ok else "DEGRADED"
+    
+    return jsonify(status), 200 if all_checks_ok else 503
 
 def check_database():
     try:
