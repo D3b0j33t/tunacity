@@ -723,9 +723,21 @@
                 });
 
                 const data = await response.json();
-                if (data.success && data.downloadUrl) {
-                    window.location.href = data.downloadUrl;
-                    statusDisplay.textContent = 'Download started!';
+                if (data.success) {
+                    // Start progress checking
+                    const progressCheck = setInterval(async () => {
+                        const progressResponse = await fetch(`/download-progress/${data.sessionId}`);
+                        const progressData = await progressResponse.json();
+                        
+                        if (progressData.status === 'finished') {
+                            clearInterval(progressCheck);
+                            // Create download link
+                            window.location.href = `${data.downloadUrl}/${data.filename}`;
+                            statusDisplay.textContent = 'Download complete!';
+                        } else if (progressData.progress) {
+                            statusDisplay.textContent = `Downloading: ${progressData.progress.toFixed(1)}%`;
+                        }
+                    }, 1000);
                 } else {
                     statusDisplay.textContent = data.message || 'Download failed. Please try again.';
                 }

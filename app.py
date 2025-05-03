@@ -98,6 +98,17 @@ progress_lock = Lock()
 def check_ffmpeg():
     """Verify FFmpeg and FFprobe are available and working"""
     try:
+        # Example: Check FFmpeg version
+        result = subprocess.run(
+            [ffmpeg_path, '-version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=5
+        )
+        logger.info(f"FFmpeg version: {result.stdout.decode('utf-8').splitlines()[0]}")
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
         for cmd_path, name in [(ffmpeg_path or "ffmpeg", "FFmpeg"), (ffprobe_path or "ffprobe", "FFprobe")]:
             result = subprocess.run(
                 [cmd_path, '-version'],
@@ -352,6 +363,8 @@ def download():
         
         # Generate a session ID for this download
         session_id = str(uuid.uuid4())
+        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
+        os.makedirs(download_dir, exist_ok=True)
         
         # Get video ID from YouTube search
         result = search_youtube(song_title, artist)
@@ -360,118 +373,116 @@ def download():
                 "success": False,
                 "message": "Couldn't find this song on YouTube"
             }), 404
-            
+        
         video_id = result['video_id']
         logger.info(f"Found YouTube video ID: {video_id} for {song_title} - {artist}")
         
-        # Start the download in a background thread to avoid blocking the request
-        def background_download():
-            try:
-                download_path = download_song(song_title, artist, session_id, video_id)
-                
-                # Update the database with the download path if successful
-                if download_path and os.path.exists(download_path):
-                    try:
-                        conn = sqlite3.connect(db_path)
-                        cursor = conn.cursor()
-                        download_url = f"/get_download/{session_id}/{os.path.basename(download_path)}"
-                        cursor.execute('''
-                            UPDATE songs 
-                            SET file_path = ?, download_url = ?
-                            WHERE title = ? AND artist = ?
-                        ''', (download_path, download_url, song_title, artist))
-                        conn.commit()
-                        conn.close()
-                    except Exception as db_err:
-                        logger.error(f"Failed to update download info in database: {db_err}")
-            except Exception as download_err:
-                logger.error(f"Background download failed: {download_err}")
+        # Create a safe filename for the output
+        safe_filename = sanitize_filename(f"{song_title} - {artist}")
         
-        # Start the download thread
-        threading.Thread(target=background_download).start()
-        
-        # Return immediately with the session ID
-        download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
-        os.makedirs(download_dir, exist_ok=True)
+        # Start download in background
+        threading.Thread(
+            target=background_download,
+            args=(song_title, artist, session_id, video_id, download_dir, safe_filename)
+        ).start()
         
         return jsonify({
             "success": True,
-            "message": "Download started. Check progress using the provided session ID.",
-            "downloadUrl": f"/get_download/{session_id}/",
-            "sessionId": session_id
-        }), 202  # 202 Accepted
+            "message": "Download started",
+            "sessionId": session_id,
+            "downloadUrl": f"/get_download/{session_id}",
+            "filename": f"{safe_filename}.mp3"
+        }), 202
     
     except Exception as e:
         logger.error(f"Error initiating download: {str(e)}")
         return jsonify({
             "success": False,
-            "message": "An error occurred while preparing your download. Please try again."
+            "message": "An error occurred while preparing your download."
         }), 500
 
+@app.route('/get_download/<session_id>', defaults={'filename': None})  # Add default route
 @app.route('/get_download/<session_id>/<path:filename>')
 def get_download(session_id, filename):
     """Serve a downloaded file and clean up after download"""
     try:
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
-        file_path = os.path.join(download_dir, filename)
         
-        if not os.path.exists(file_path):
-            logger.warning(f"File not found: {file_path}")
-            
-            # Check if the download is still in progress
-            with progress_lock:
-                if session_id in download_progress:
-                    progress = download_progress.get(session_id, {}).get('progress', 0)
-                    return jsonify({
-                        "success": False,
-                        "message": f"Download in progress: {progress:.1f}% complete. Please try again later."
-                    }), 202
-            
+        # If no filename provided, look for any MP3 file in the directory
+        if not filename:
+            mp3_files = [f for f in os.listdir(download_dir) if f.endswith('.mp3')]
+            if mp3_files:
+                filename = mp3_files[0]
+            else:
+                # Check if download is in progress
+                with progress_lock:
+                    if session_id in download_progress:
+                        progress = download_progress.get(session_id, {}).get('progress', 0)
+                        return jsonify({
+                            "success": False,
+                            "message": f"Download in progress: {progress:.1f}% complete"
+                        }), 202
+                return jsonify({
+                    "success": False,
+                    "message": "No download found"
+                }), 404
+        
+        file_path = safe_join(download_dir, filename)
+        if file_path is None or not os.path.exists(file_path):
+            logger.warning(f"File not found: {filename} in {download_dir}")
             return jsonify({
                 "success": False,
-                "message": "File not found or already downloaded"
+                "message": "File not found"
             }), 404
         
-        # Schedule cleanup of files after download completes
+        # Schedule cleanup after successful download
         @after_this_request
         def cleanup(response):
             try:
-                # Start a background thread to clean up later
                 threading.Thread(target=lambda: cleanup_download(file_path, download_dir)).start()
-                logger.info(f"Scheduled cleanup for {file_path} and {download_dir}")
             except Exception as e:
-                logger.error(f"Error in cleanup scheduling: {str(e)}")
+                logger.error(f"Error scheduling cleanup: {str(e)}")
             return response
-        
-        # Safe filename for download
-        safe_filename = sanitize_filename(filename)
-        
-        # Update play count in database
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE songs 
-                SET play_count = play_count + 1
-                WHERE file_path = ?
-            ''', (file_path,))
-            conn.commit()
-            conn.close()
-        except Exception as db_err:
-            logger.warning(f"Failed to update play count: {db_err}")
         
         return send_file(
             file_path,
             as_attachment=True,
-            download_name=safe_filename
+            download_name=os.path.basename(file_path)
         )
-    
+        
     except Exception as e:
         logger.error(f"Error serving download: {str(e)}")
         return jsonify({
             "success": False,
-            "message": "An error occurred while serving your download"
+            "message": "Error serving download"
         }), 500
+
+def background_download(song_title, artist, session_id, video_id, download_dir, safe_filename):
+    """Background download function"""
+    try:
+        download_path = download_song(song_title, artist, session_id, video_id)
+        if download_path and os.path.exists(download_path):
+            # Move the file to the download directory with the safe filename
+            final_path = os.path.join(download_dir, f"{safe_filename}.mp3")
+            shutil.move(download_path, final_path)
+            
+            # Update database
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                download_url = f"/get_download/{session_id}/{safe_filename}.mp3"
+                cursor.execute('''
+                    UPDATE songs 
+                    SET file_path = ?, download_url = ?
+                    WHERE title = ? AND artist = ?
+                ''', (final_path, download_url, song_title, artist))
+                conn.commit()
+                conn.close()
+                logger.info(f"Download completed and moved to {final_path}")
+            except Exception as db_err:
+                logger.error(f"Failed to update download info in database: {db_err}")
+    except Exception as e:
+        logger.error(f"Background download failed: {str(e)}")
 
 @app.route('/download-progress/<session_id>')
 def get_download_progress(session_id):
