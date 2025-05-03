@@ -296,7 +296,7 @@ def download():
             logger.error("Download failed: No download path or file doesn't exist")
             return jsonify({
                 "success": False,
-                "message": "Failed to download the song. Please try again."
+                "message": "This Feature is still in development. Please try again later."
             }), 500
     
     except Exception as e:
