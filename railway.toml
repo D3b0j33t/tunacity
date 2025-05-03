@@ -2,9 +2,13 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "gunicorn app:app"
+startCommand = "python app.py"
 healthcheckPath = "/"
-healthcheckTimeout = 300
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+
+[deploy.envs]
+NIXPACKS_APT_PKGS = "ffmpeg"
 
 [nixpacks]
 python-version = "3.11"

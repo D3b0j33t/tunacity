@@ -30,7 +30,7 @@ app = Flask(__name__, template_folder='templates', static_folder='static')
 UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
 DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', '/tmp/downloads')
 MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))
-SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 
 app.config['SECRET_KEY'] = SECRET_KEY
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
@@ -360,6 +360,8 @@ def cleanup_old_downloads():
         logger.error(f"Error during cleanup: {str(e)}")
 
 if __name__ == '__main__':
-    # Use PORT environment variable for compatibility with cloud platforms
+    # Use PORT environment variable for Railway compatibility
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # In production, debug should always be False
+    debug = os.environ.get('FLASK_DEBUG', '0') == '1'
+    app.run(host='0.0.0.0', port=port, debug=debug)
