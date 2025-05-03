@@ -5,12 +5,14 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
-import { YTDlpWrap } from 'yt-dlp-wrap';
+import ytDlpWrap from 'yt-dlp-wrap';
 import ffmpeg from 'fluent-ffmpeg';
 import fetch from 'node-fetch';
+import FormData from 'form-data';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+const YTDlpWrap = ytDlpWrap.default;
 const ytdlp = new YTDlpWrap();
 
 // Fix directory paths for Railway
