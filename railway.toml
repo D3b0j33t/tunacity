@@ -1,38 +1,19 @@
 [build]
-builder = "NIXPACKS"
+builder = "nixpacks"
 buildCommand = "pip install -r requirements.txt"
 
 [deploy]
 startCommand = "python app.py"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 100
+healthcheckTimeout = 5
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 
-[deploy.envs]
-NIXPACKS_INSTALL_CMD = """
-apt-get update && \
-apt-get install -y ffmpeg python3-dev build-essential libffi-dev libssl-dev portaudio19-dev && \
-ln -s /usr/bin/ffmpeg /usr/local/bin/ffmpeg && \
-ln -s /usr/bin/ffprobe /usr/local/bin/ffprobe
-"""
-RAILWAY_ENVIRONMENT = "production"
-FFMPEG_PATH = "/usr/local/bin/ffmpeg"
-FFPROBE_PATH = "/usr/local/bin/ffprobe"
-UPLOAD_FOLDER = "/tmp/uploads"
-DOWNLOAD_FOLDER = "/tmp/downloads"
-MAX_CONTENT_LENGTH = "16777216"  # 16MB in bytes
-
-[nixpacks]
-python-version = "3.11"
-
-[[services.ports]]
-handlers = ["http"]
-port = "80"
-
-[[services.ports]]
-handlers = ["tls"]
-port = "443"
-
 [env]
 RAILWAY_ENVIRONMENT = "production"
+PYTHON_VERSION = "3.11.10"
+PATH = "/root/.nix-profile/bin:${PATH}"
+
+[[ports]]
+port = "8080"
+protocol = "http"

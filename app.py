@@ -40,10 +40,25 @@ load_dotenv()
 
 # Railway-specific configuration
 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-    UPLOAD_FOLDER = tempfile.gettempdir()
-    DOWNLOAD_FOLDER = tempfile.gettempdir()
-    ffmpeg_path = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
-    ffprobe_path = shutil.which("ffprobe") or "/usr/bin/ffprobe"
+    UPLOAD_FOLDER = '/tmp'  # Use Railway's temporary directory
+    DOWNLOAD_FOLDER = '/tmp'
+    ffmpeg_path = "/root/.nix-profile/bin/ffmpeg"  # Updated path from logs
+    ffprobe_path = "/root/.nix-profile/bin/ffprobe"  # Updated path from logs
+    
+    # Set additional Railway-specific configurations
+    os.environ['FFMPEG_BINARY'] = ffmpeg_path
+    os.environ['FFPROBE_BINARY'] = ffprobe_path
+    
+    # Configure for Railway's environment
+    app.config.update(
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE='Lax',
+        PREFERRED_URL_SCHEME='https'
+    )
+    
+    # Configure logging for Railway
+    logging.getLogger('waitress').setLevel(logging.INFO)
 else:
     UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', './tmp/uploads')
     DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', './tmp/downloads')
@@ -522,7 +537,8 @@ async def recognize_song(file_path):
     """Use ShazamIO to recognize a song from an audio file"""
     try:
         shazam = Shazam()
-        out = await shazam.recognize_song(file_path)
+        # Update to use the new recognize method instead of recognize_song
+        out = await shazam.recognize(file_path)
         if out and out.get('track'):
             return out
         return None
