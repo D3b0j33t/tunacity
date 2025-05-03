@@ -18,6 +18,12 @@ import subprocess
 import shutil
 import sqlite3
 from datetime import datetime
+from waitress import serve
+import tempfile
+import psutil
+import hashlib
+from functools import wraps
+from werkzeug.security import safe_join
 
 # Configure logging first before any other initialization
 logging.basicConfig(
@@ -34,10 +40,10 @@ load_dotenv()
 
 # Railway-specific configuration
 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-    UPLOAD_FOLDER = '/tmp/uploads'
-    DOWNLOAD_FOLDER = '/tmp/downloads'
-    ffmpeg_path = "/usr/bin/ffmpeg"
-    ffprobe_path = "/usr/bin/ffprobe"
+    UPLOAD_FOLDER = tempfile.gettempdir()
+    DOWNLOAD_FOLDER = tempfile.gettempdir()
+    ffmpeg_path = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    ffprobe_path = shutil.which("ffprobe") or "/usr/bin/ffprobe"
 else:
     UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', './tmp/uploads')
     DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', './tmp/downloads')
@@ -173,7 +179,22 @@ def index():
         logger.error(f"Error rendering index template: {str(e)}")
         return "Error loading the application. Please check the server logs.", 500
 
+# Add error handling decorator
+def handle_errors(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in {f.__name__}: {str(e)}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "message": "An internal error occurred. Please try again."
+            }), 500
+    return wrapper
+
 @app.route('/recognize', methods=['POST'])
+@handle_errors
 def recognize():
     """Endpoint to recognize a song from an audio file"""
     if 'audio' not in request.files:
@@ -190,7 +211,9 @@ def recognize():
     try:
         filename = secure_filename(audio_file.filename)
         unique_filename = f"{uuid.uuid4()}_{filename}"
-        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        file_path = safe_join(UPLOAD_FOLDER, unique_filename)
+        if file_path is None:
+            return jsonify({"success": False, "message": "Invalid filename"}), 400
         
         audio_file.save(file_path)
         logger.info(f"Audio saved to {file_path}")
@@ -444,36 +467,43 @@ def get_download_progress(session_id):
 
 @app.route('/healthz')
 def healthz():
-    """Health check endpoint for Railway and monitoring"""
-    # Check database connection
-    db_ok = False
+    status = {
+        "status": "OK",
+        "checks": {
+            "ffmpeg": ffmpeg_available,
+            "database": check_database(),
+            "disk": check_disk_space(),
+            "memory": check_memory(),
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    status["status"] = "OK" if all(status["checks"].values()) else "DEGRADED"
+    return jsonify(status), 200 if status["status"] == "OK" else 503
+
+def check_database():
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT 1")
         conn.close()
-        db_ok = True
+        return True
     except Exception:
-        pass
-    
-    # Check disk space
-    disk_ok = True
+        return False
+
+def check_disk_space():
     try:
         total, used, free = shutil.disk_usage("/")
-        disk_ok = (free / total) > 0.05  # At least 5% free space
+        return (free / total) > 0.10  # Require 10% free space
     except Exception:
-        pass
-    
-    health_status = {
-        "status": "OK" if ffmpeg_available and db_ok and disk_ok else "DEGRADED",
-        "ffmpeg": ffmpeg_available,
-        "database": db_ok,
-        "disk": disk_ok,
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    status_code = 200 if health_status["status"] == "OK" else 503
-    return jsonify(health_status), status_code
+        return False
+
+def check_memory():
+    try:
+        memory = psutil.virtual_memory()
+        return memory.available > 500 * 1024 * 1024  # Require 500MB free
+    except Exception:
+        return False
 
 def cleanup_download(file_path, dir_path):
     """Clean up downloaded files after a delay"""
@@ -624,7 +654,7 @@ def download_song(song_title, artist, session_id, video_id):
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                'preferredquality': 192,
             }],
             'progress_hooks': [lambda d: progress_hook(d, session_id)],
             'prefer_ffmpeg': True,
@@ -752,7 +782,6 @@ if __name__ == '__main__':
         
         # Use waitress for production
         try:
-            from waitress import serve
             serve(app, host='0.0.0.0', port=port, threads=8)
         except ImportError:
             logger.warning("Waitress not installed, falling back to Flask's built-in server (not recommended for production)")
