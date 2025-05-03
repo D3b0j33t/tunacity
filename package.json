@@ -17,7 +17,8 @@
     "dotenv": "^16.4.1",
     "ffmpeg-static": "^5.2.0",
     "ytdl-core": "^4.11.5",
-    "fluent-ffmpeg": "^2.1.2"
+    "fluent-ffmpeg": "^2.1.2",
+    "form-data": "^4.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
