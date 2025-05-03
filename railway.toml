@@ -11,6 +11,7 @@ restartPolicyType = "ON_FAILURE"
 NIXPACKS_APT_PKGS = "ffmpeg python3-dev build-essential libffi-dev libssl-dev"
 RAILWAY_ENVIRONMENT = "production"
 FFMPEG_PATH = "/usr/bin/ffmpeg"
+FFPROBE_PATH = "/usr/bin/ffprobe"
 
 [nixpacks]
 python-version = "3.11"

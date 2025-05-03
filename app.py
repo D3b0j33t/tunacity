@@ -23,19 +23,27 @@ import shutil
 load_dotenv()
 
 # Dynamically find ffmpeg binary path
-ffmpeg_path = shutil.which("ffmpeg")
-if (ffmpeg_path):
-    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + ":" + os.environ.get("PATH", "")
+ffmpeg_path = os.environ.get('FFMPEG_PATH') or shutil.which("ffmpeg")
+if ffmpeg_path:
+    os.environ["PATH"] = os.path.dirname(ffmpeg_path) + os.pathsep + os.environ.get("PATH", "")
     os.environ["FFMPEG_BINARY"] = ffmpeg_path
 else:
-    # fallback for legacy, but should not happen on Railway/Nixpacks
+    logger.warning("FFmpeg not found in PATH")
     os.environ["FFMPEG_BINARY"] = "ffmpeg"
 
 # Dynamically find ffprobe binary path
-ffprobe_path = shutil.which("ffprobe")
+ffprobe_path = os.environ.get('FFPROBE_PATH') or shutil.which("ffprobe")
+if not ffprobe_path and ffmpeg_path:
+    # Look in same directory as ffmpeg
+    candidate = os.path.join(os.path.dirname(ffmpeg_path), "ffprobe")
+    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        ffprobe_path = candidate
+
 if ffprobe_path:
+    os.environ["PATH"] = os.path.dirname(ffprobe_path) + os.pathsep + os.environ.get("PATH", "")
     os.environ["FFPROBE_BINARY"] = ffprobe_path
 else:
+    logger.warning("FFprobe not found in PATH")
     os.environ["FFPROBE_BINARY"] = "ffprobe"
 
 # Configure logging

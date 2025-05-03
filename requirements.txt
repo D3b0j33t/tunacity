@@ -6,3 +6,4 @@ python-dotenv==1.0.0
 Werkzeug==2.3.7
 waitress==2.1.2
 Flask-Talisman==0.8.1
+pydub==0.25.1
