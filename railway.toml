@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm install"
+buildCommand = "npm run build"
 
 [deploy]
 startCommand = "npm start"
@@ -17,11 +17,13 @@ DOWNLOAD_DIR = "/tmp/downloads"
 
 [nixpacks]
 node_version = "18.x"
+enable_cache = true
+install_cmd = "npm install"
 
 [[services.ports]]
 handlers = ["http"]
-port = "80"
+port = "8080"
 
 [[services.ports]]
-handlers = ["tls"]
+handlers = ["tls", "http"]
 port = "443"

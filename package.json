@@ -5,8 +5,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "postinstall": "mkdir -p tmp/uploads tmp/downloads && cd frontend && npm install && npm run build",
-    "build": "cd frontend && npm install && npm run build"
+    "postinstall": "mkdir -p tmp/uploads tmp/downloads && cd frontend && npm install",
+    "build": "cd frontend && npm install && npm run build",
+    "heroku-postbuild": "npm run build"
   },
   "dependencies": {
     "cors": "^2.8.5",
