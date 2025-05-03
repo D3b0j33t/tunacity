@@ -99,13 +99,32 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# Add new headers for microphone access
+@app.after_request
+def add_header(response):
+    response.headers['Feature-Policy'] = 'microphone *'
+    response.headers['Permissions-Policy'] = 'microphone=*'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
+
+# Update the ffmpeg check function
 def check_ffmpeg():
     try:
-        # Check if ffmpeg is available
-        subprocess.run([ffmpeg_path or "ffmpeg", '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ffmpeg_result = subprocess.run(
+            [ffmpeg_path or "ffmpeg", '-version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True
+        )
+        ffprobe_result = subprocess.run(
+            [ffprobe_path or "ffprobe", '-version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True
+        )
         return True
-    except FileNotFoundError:
-        logger.warning("FFmpeg not found in PATH")
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        logger.error(f"FFmpeg/FFprobe check failed: {str(e)}")
         return False
 
 # Check for FFmpeg availability
