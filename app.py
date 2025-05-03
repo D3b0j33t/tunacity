@@ -320,13 +320,13 @@ def download_song(song_title, artist, session_id, video_id):
             if d['status'] == 'downloading':
                 with progress_lock:
                     download_progress[session_id] = {
-                        'progress': d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100,
+                        'progress': d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100 if d.get('total_bytes') else 0,
                         'speed': d.get('speed', 0),
                         'eta': d.get('eta', 0)
                     }
 
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio',
             'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
@@ -337,25 +337,46 @@ def download_song(song_title, artist, session_id, video_id):
             'prefer_ffmpeg': True,
             'ffmpeg_location': ffmpeg_path,
             'socket_timeout': 30,
+            'no_warnings': True,
+            'quiet': True,
+            'extract_audio': True,
+            'audio_format': 'mp3',
+            'audio_quality': '192K',
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'geo_bypass': True,
+            'force_generic_extractor': False
         }
         
-        with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        logger.info(f"Starting download for {video_url}")
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
                 info_dict = ydl.extract_info(video_url, download=True)
+                if not info_dict:
+                    logger.error("No video information extracted")
+                    return None
+                    
                 downloaded_file = os.path.splitext(ydl.prepare_filename(info_dict))[0] + ".mp3"
-        
-        with progress_lock:
-            if session_id in download_progress:
-                del download_progress[session_id]
-        
-        return downloaded_file if os.path.exists(downloaded_file) else None
+                
+                if not os.path.exists(downloaded_file):
+                    logger.error(f"Downloaded file not found at {downloaded_file}")
+                    return None
+                    
+                logger.info(f"Successfully downloaded to {downloaded_file}")
+                return downloaded_file
+                
+            except Exception as e:
+                logger.error(f"YoutubeDL error: {str(e)}")
+                return None
             
     except Exception as e:
         logger.error(f"Error during song download: {str(e)}")
+        return None
+    finally:
         with progress_lock:
             if session_id in download_progress:
                 del download_progress[session_id]
-        return None
 
 @app.route('/download-progress/<session_id>')
 def get_download_progress(session_id):
