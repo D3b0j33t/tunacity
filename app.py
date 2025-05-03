@@ -365,7 +365,7 @@ def download_song(song_title, artist, session_id, video_id):
         logger.info(f"Starting download from {video_url} to {output_template}")
 
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',  # Updated format selection
             'outtmpl': output_template,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
@@ -374,19 +374,44 @@ def download_song(song_title, artist, session_id, video_id):
             }],
             'progress_hooks': [lambda d: progress_hook(d, session_id)],
             'prefer_ffmpeg': True,
-            'ffmpeg_location': ffmpeg_path or 'ffmpeg',
+            'ffmpeg_location': ffmpeg_path,
             'no_warnings': True,
-            'quiet': True
+            'quiet': True,
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'no_color': True,
+            'extract_flat': False,
+            'format_sort': ['abr'],  # Sort by average bitrate
+            'geo_bypass': True,
+            'socket_timeout': 30,
+            'extractor_retries': 3,
+            'http_headers': {  # Add custom headers to avoid 403
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            },
+            'external_downloader_args': ['-timeout', '30'],
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 logger.info("Extracting video info...")
-                info = ydl.extract_info(video_url, download=True)
+                # First get the info without downloading
+                info = ydl.extract_info(video_url, download=False)
                 if not info:
                     logger.error("No video information extracted")
                     return None
 
+                # Get available formats
+                formats = info.get('formats', [])
+                if not formats:
+                    logger.error("No formats available")
+                    return None
+
+                # Now download with the verified format
+                info = ydl.extract_info(video_url, download=True)
+                
                 # Get the final filepath
                 downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
                 logger.info(f"Download completed: {downloaded_file}")
@@ -399,11 +424,24 @@ def download_song(song_title, artist, session_id, video_id):
 
             except Exception as e:
                 logger.error(f"YoutubeDL error: {str(e)}")
+                # Try alternate format if first attempt fails
+                try:
+                    ydl_opts['format'] = 'worstaudio/worst'  # Try with lowest quality as fallback
+                    info = ydl.extract_info(video_url, download=True)
+                    downloaded_file = os.path.splitext(ydl.prepare_filename(info))[0] + ".mp3"
+                    if os.path.exists(downloaded_file):
+                        return downloaded_file
+                except Exception as e2:
+                    logger.error(f"Fallback download failed: {str(e2)}")
                 return None
 
     except Exception as e:
         logger.error(f"Error during song download: {str(e)}")
         return None
+    finally:
+        with progress_lock:
+            if session_id in download_progress:
+                del download_progress[session_id]
 
 def progress_hook(d, session_id):
     try:
