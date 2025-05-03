@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+# Initialize Flask app (move this up before any app.config usage)
+app = Flask(__name__, template_folder='templates', static_folder='static')
+
 # Railway-specific configuration
 if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
     UPLOAD_FOLDER = '/tmp'  # Use Railway's temporary directory
