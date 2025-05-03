@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_file, Response, after_this_request
-from flask_talisman import Talisman
+# from flask_talisman import Talismanan
 import os
 import asyncio
 from shazamio import Shazam
@@ -38,26 +38,26 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
 # Security headers configuration
-Talisman(app,
-    content_security_policy={
-        'default-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'", 
-                       "https://cdnjs.cloudflare.com", 
-                       "https://fonts.googleapis.com", 
-                       "https://fonts.gstatic.com"],
-        'media-src': ["'self'", "blob:"],
-        'connect-src': ["'self'"],
-        'img-src': ["'self'", "data:", "https:"],
-        'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-        'style-src': ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", 
-                     "https://cdnjs.cloudflare.com"],
-        'font-src': ["'self'", "https://fonts.gstatic.com", 
-                    "https://cdnjs.cloudflare.com"]
-    },
-    feature_policy={
-        'microphone': "'self'",
-        'autoplay': "'self'"
-    }
-)
+# Talisman(app,p,
+#     content_security_policy={={
+#         'default-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'", , 
+#                        "https://cdnjs.cloudflare.com", , 
+#                        "https://fonts.googleapis.com", , 
+#                        "https://fonts.gstatic.com"],],
+#         'media-src': ["'self'", "blob:"],],
+#         'connect-src': ["'self'"],],
+#         'img-src': ["'self'", "data:", "https:"],],
+#         'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'"],],
+#         'style-src': ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", , 
+#                      "https://cdnjs.cloudflare.com"],],
+#         'font-src': ["'self'", "https://fonts.gstatic.com", , 
+#                     "https://cdnjs.cloudflare.com"]"]
+#     },},
+#     feature_policy={={
+#         'microphone': "'self'",",
+#         'autoplay': "'self'"'"
+#     } }
+# ) )
 
 # Configuration
 UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
@@ -84,7 +84,7 @@ def allowed_file(filename):
 def check_ffmpeg():
     try:
         # Check if ffmpeg is available
-        subprocess.run([os.environ.get("FFMPEG_BINARY", "ffmpeg"), '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run([ffmpeg_path or "ffmpeg", '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return True
     except FileNotFoundError:
         logger.warning("FFmpeg not found in PATH")
@@ -337,16 +337,14 @@ def search_spotify(song_title, artist):
 # Download song function
 def download_song(song_title, artist, session_id, video_id):
     try:
-        # Get FFmpeg path from environment or use default
-        ffmpeg_path = os.environ.get('FFMPEG_PATH', 'ffmpeg')
-        
+        # Always use the dynamically detected ffmpeg_path
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         download_dir = os.path.join(DOWNLOAD_FOLDER, session_id)
         os.makedirs(download_dir, exist_ok=True)
-        
+
         sanitized_title = sanitize_filename(f"{song_title} - {artist}")
         output_template = os.path.join(download_dir, f"{sanitized_title}.%(ext)s")
-        
+
         def progress_hook(d):
             if d['status'] == 'downloading':
                 with progress_lock:
@@ -366,7 +364,7 @@ def download_song(song_title, artist, session_id, video_id):
             }],
             'progress_hooks': [progress_hook],
             'prefer_ffmpeg': True,
-            'ffmpeg_location': ffmpeg_path,
+            'ffmpeg_location': ffmpeg_path or "ffmpeg",
             'socket_timeout': 30,
             'no_warnings': True,
             'quiet': True,
@@ -378,29 +376,29 @@ def download_song(song_title, artist, session_id, video_id):
             'geo_bypass': True,
             'force_generic_extractor': False
         }
-        
+
         logger.info(f"Starting download for {video_url}")
-        
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
                 info_dict = ydl.extract_info(video_url, download=True)
                 if not info_dict:
                     logger.error("No video information extracted")
                     return None
-                    
+
                 downloaded_file = os.path.splitext(ydl.prepare_filename(info_dict))[0] + ".mp3"
-                
+
                 if not os.path.exists(downloaded_file):
                     logger.error(f"Downloaded file not found at {downloaded_file}")
                     return None
-                    
+
                 logger.info(f"Successfully downloaded to {downloaded_file}")
                 return downloaded_file
-                
+
             except Exception as e:
                 logger.error(f"YoutubeDL error: {str(e)}")
                 return None
-            
+
     except Exception as e:
         logger.error(f"Error during song download: {str(e)}")
         return None
@@ -434,12 +432,14 @@ def cleanup_old_downloads():
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
+@app.route('/healthz')
+def healthz():
+    return "OK", 200
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))  # Change default port to 8080
+    port = int(os.environ.get('PORT', 8080))
     if os.environ.get('RAILWAY_ENVIRONMENT') == 'production':
-        # Use production server
         from waitress import serve
         serve(app, host='0.0.0.0', port=port)
     else:
-        # Use development server
         app.run(host='0.0.0.0', port=port, debug=False)
